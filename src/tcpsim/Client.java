@@ -1,4 +1,3 @@
-
 package tcpsim;
 
 import java.net.DatagramPacket;
@@ -79,6 +78,20 @@ public class Client {
 
     public static void main(String[] args) throws Exception {
         Thread.currentThread().setName("MainThread");
+
+        // ---------------- Doc tham so cau hinh mo phong mang (neu co) ----------------
+        // Cach chay: java -cp bin tcpsim.Client <ti_le_mat_goi_%> <do_tre_min_ms> <do_tre_max_ms>
+        // Vi du: java -cp bin tcpsim.Client 20 100 400
+        // Khong truyen gi -> mac dinh KHONG mo phong (giong Buoc 4-5).
+        double lossRate = 0.0;
+        int minDelay = 0;
+        int maxDelay = 0;
+        if (args.length >= 3) {
+            lossRate = Double.parseDouble(args[0]) / 100.0;
+            minDelay = Integer.parseInt(args[1]);
+            maxDelay = Integer.parseInt(args[2]);
+        }
+        NetworkSimulator.configure(lossRate, minDelay, maxDelay);
 
         clientSocket = new DatagramSocket();
         serverAddress = InetAddress.getByName(SERVER_HOST);
@@ -271,8 +284,9 @@ public class Client {
     }
 
     static void sendRaw(Packet packet) throws Exception {
-        byte[] bytes = packet.encode();
-        clientSocket.send(new DatagramPacket(bytes, bytes.length, serverAddress, SERVER_PORT));
+        // Buoc 6: gui qua NetworkSimulator thay vi goi thang socket.send(...),
+        // de goi tin co the bi mat/tre theo cau hinh mo phong mang.
+        NetworkSimulator.send(clientSocket, packet, serverAddress, SERVER_PORT);
     }
 
     static Packet receiveRaw() throws Exception {
