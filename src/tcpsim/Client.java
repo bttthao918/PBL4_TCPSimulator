@@ -11,8 +11,12 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Random;
 
+import tcpsim.gui.EventBus;
+import tcpsim.gui.PacketEvent;
+import tcpsim.gui.Visualizer;
+
 /**
- * Client.java (Buoc 5 - them Threading that + Timeout/Retransmission that)
+ * Client.java (Buoc 7 - them giao dien truc quan hoa goi tin)
  * ----------------------------------------------------------------------------
  * Diem khac biet lon nhat so voi Buoc 4: viec gui du lieu, nhan ACK, va kiem tra
  * timeout gio day chay tren 3 THREAD RIENG BIET, khong con tuan tu tren 1 luong:
@@ -93,6 +97,10 @@ public class Client {
         }
         NetworkSimulator.configure(lossRate, minDelay, maxDelay);
 
+        // Buoc 7: mo cua so truc quan hoa TRUOC KHI bat tay, de khong bo lo
+        // su kien nao. Visualizer.launch() tu tao GUI tren dung thread cua Swing.
+        Visualizer.launch();
+
         clientSocket = new DatagramSocket();
         serverAddress = InetAddress.getByName(SERVER_HOST);
 
@@ -115,6 +123,8 @@ public class Client {
                         && response.ackNum == clientIsn + 1) {
                     synAckReceived = response;
                     log("Nhan duoc SYN-ACK hop le: " + response);
+                    EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Server -> Client",
+                            response.flagsToString(), response.seqNum, response.ackNum, "Phan hoi bat tay"));
                 }
             } catch (SocketTimeoutException e) {
                 log("Qua han, chua nhan duoc SYN-ACK. Thu gui lai...");
@@ -237,6 +247,8 @@ public class Client {
                         }
                     }
                     log("Nhan ACK, server dang cho seq=" + ackNum);
+                    EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Server -> Client",
+                            "ACK", response.seqNum, ackNum, ""));
                 }
             } catch (Exception e) {
                 return; // socket dong (ket thuc chuong trinh) -> thoat thread trong yen lang
@@ -269,7 +281,10 @@ public class Client {
                         }
                         try {
                             Packet resend = new Packet(seq, 0, info.flags, info.payload);
-                            sendRaw(resend);
+                            // Goi truc tiep NetworkSimulator.send (khong qua sendRaw) de
+                            // bao dung trang thai RETRANSMITTED thay vi SENT cho GUI.
+                            NetworkSimulator.send(clientSocket, resend, serverAddress, SERVER_PORT,
+                                    "Client -> Server", PacketEvent.Status.RETRANSMITTED);
                             info.retryCount++;
                             info.sentTime = now;
                             log("Qua RTO (" + RTO_MS + "ms) chua co ACK -> GUI LAI seq=" + seq
@@ -283,10 +298,10 @@ public class Client {
         }
     }
 
+    /** Dung cho LAN GUI DAU cua moi goi tin (SYN, ACK, segment, FIN) - bao GUI la SENT. */
     static void sendRaw(Packet packet) throws Exception {
-        // Buoc 6: gui qua NetworkSimulator thay vi goi thang socket.send(...),
-        // de goi tin co the bi mat/tre theo cau hinh mo phong mang.
-        NetworkSimulator.send(clientSocket, packet, serverAddress, SERVER_PORT);
+        NetworkSimulator.send(clientSocket, packet, serverAddress, SERVER_PORT,
+                "Client -> Server", PacketEvent.Status.SENT);
     }
 
     static Packet receiveRaw() throws Exception {

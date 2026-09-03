@@ -9,17 +9,20 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
 
+import tcpsim.gui.PacketEvent;
+
 /**
- * Server.java (Buoc 4 - them truyen du lieu phan doan + ACK)
- * -------------------------------------------------------------
- * So voi Buoc 3, them phan xu ly khi da ESTABLISHED:
- *   - Nhan tung segment du lieu, kiem tra dung thu tu (seq_num)
- *   - Neu dung thu tu: rap vao buffer, gui ACK, tang expectedDataSeq
- *   - Neu segment den KHONG dung thu tu (out-of-order): tam luu lai,
- *     khong tang expectedDataSeq, van gui ACK bao "toi dang cho seq nao"
- *   - Khi nhan goi FIN: in ra toan bo du lieu da rap duoc
+ * Server.java (Buoc 6 - gui qua NetworkSimulator de mo phong mat goi/tre)
+ * ---------------------------------------------------------------------------
+ * So voi Buoc 4, CHI THAY DOI 1 CHO: moi lan gui goi tin (SYN-ACK, ACK, FIN-ACK)
+ * gio di qua NetworkSimulator.send(...) thay vi socket.send(...) truc tiep.
+ * Toan bo logic bat tay / truyen du lieu / ACK giu nguyen y het Buoc 4-5.
  *
- * Server hien van chi phuc vu 1 client tai 1 thoi diem (giong Buoc 3).
+ * Cach chay co mo phong mang:
+ *   java -cp bin tcpsim.Server <ti_le_mat_goi_%> <do_tre_min_ms> <do_tre_max_ms>
+ *   Vi du: java -cp bin tcpsim.Server 20 100 400
+ *          (20% goi bi mat, moi goi con lai tre ngau nhien 100-400ms)
+ *   Khong truyen tham so -> mac dinh KHONG mo phong gi (giong Buoc 4-5).
  */
 public class Server {
 
@@ -28,15 +31,10 @@ public class Server {
 
     static String connectionState = "CLOSED";
     static int serverIsn;
-    static int expectedClientSeq;     // seq client dung trong goi SYN (truoc handshake)
-    static int expectedDataSeq;       // seq ke tiep server dang cho nhan (sau handshake)
+    static int expectedClientSeq;
+    static int expectedDataSeq;
 
-    // Buffer tam cho cac segment den KHONG dung thu tu (out-of-order),
-    // key = seq_num cua segment, value = du lieu (payload) cua segment do.
     static final Map<Integer, byte[]> outOfOrderBuffer = new HashMap<>();
-
-    // Noi rap du lieu da nhan dung thu tu, dung StringBuilder cho de doc log
-    // (thuc te nen dung mot mang byte dong, nhung StringBuilder de hinh dung hon).
     static final StringBuilder receivedData = new StringBuilder();
 
     static final Random random = new Random();
@@ -47,6 +45,17 @@ public class Server {
     }
 
     public static void main(String[] args) throws Exception {
+        // ---------------- Doc tham so cau hinh mo phong mang (neu co) ----------------
+        double lossRate = 0.0;
+        int minDelay = 0;
+        int maxDelay = 0;
+        if (args.length >= 3) {
+            lossRate = Double.parseDouble(args[0]) / 100.0;
+            minDelay = Integer.parseInt(args[1]);
+            maxDelay = Integer.parseInt(args[2]);
+        }
+        NetworkSimulator.configure(lossRate, minDelay, maxDelay);
+
         DatagramSocket serverSocket = new DatagramSocket(PORT);
         log("Server dang lang nghe tai cong " + PORT + " ...");
         log("Trang thai ket noi: " + connectionState);
@@ -75,7 +84,8 @@ public class Server {
 
                 byte synAckFlags = (byte) (Packet.FLAG_SYN | Packet.FLAG_ACK);
                 Packet synAck = new Packet(serverIsn, expectedClientSeq + 1, synAckFlags, new byte[0]);
-                sendPacket(serverSocket, synAck, clientAddress);
+                NetworkSimulator.send(serverSocket, synAck, clientAddress.getAddress(), clientAddress.getPort(),
+                        "Server -> Client", PacketEvent.Status.SENT);
 
                 connectionState = "SYN_RECEIVED";
                 log("Da gui SYN-ACK (seq=" + serverIsn + ", ack=" + (expectedClientSeq + 1)
@@ -88,10 +98,8 @@ public class Server {
 
                 if (packet.ackNum == serverIsn + 1) {
                     connectionState = "ESTABLISHED";
-                    // Ngay khi ESTABLISHED, segment du lieu dau tien se co
-                    // seq bat dau bang chinh seq cua goi ACK nay (= clientIsn + 1)
                     expectedDataSeq = packet.seqNum;
-                    receivedData.setLength(0); // don buffer cu (neu co) truoc phien moi
+                    receivedData.setLength(0);
                     outOfOrderBuffer.clear();
                     log(">>> BAT TAY HOAN TAT! Trang thai -> " + connectionState
                             + " | cho du lieu tu seq=" + expectedDataSeq + " <<<");
@@ -106,9 +114,9 @@ public class Server {
                 log("=== DU LIEU DA RAP DUOC (" + receivedData.length() + " ky tu) ===");
                 log("\"" + receivedData + "\"");
 
-                // Gui ACK xac nhan da nhan FIN
                 Packet finAck = new Packet(0, packet.seqNum + 1, Packet.FLAG_ACK, new byte[0]);
-                sendPacket(serverSocket, finAck, clientAddress);
+                NetworkSimulator.send(serverSocket, finAck, clientAddress.getAddress(), clientAddress.getPort(),
+                        "Server -> Client", PacketEvent.Status.SENT);
                 log("Da gui ACK xac nhan FIN. Phien truyen du lieu ket thuc.");
             }
 
@@ -117,14 +125,11 @@ public class Server {
                     && !Packet.hasFlag(packet.flags, Packet.FLAG_SYN)) {
 
                 if (packet.seqNum == expectedDataSeq) {
-                    // Dung thu tu mong doi -> rap ngay vao du lieu
                     receivedData.append(new String(packet.payload));
                     expectedDataSeq += packet.payload.length;
                     log("Segment DUNG thu tu (seq=" + packet.seqNum + ", " + packet.payload.length
                             + " byte) -> da rap. Cho tiep seq=" + expectedDataSeq);
 
-                    // Sau khi rap segment nay, kiem tra xem trong outOfOrderBuffer
-                    // co san segment nao la "tiep theo ngay" khong -> rap luon (flush).
                     while (outOfOrderBuffer.containsKey(expectedDataSeq)) {
                         byte[] bufferedPayload = outOfOrderBuffer.remove(expectedDataSeq);
                         receivedData.append(new String(bufferedPayload));
@@ -132,19 +137,16 @@ public class Server {
                         expectedDataSeq += bufferedPayload.length;
                     }
                 } else if (packet.seqNum > expectedDataSeq) {
-                    // Den SOM hon mong doi (out-of-order) -> tam luu lai, chua rap
                     outOfOrderBuffer.put(packet.seqNum, packet.payload);
                     log("Segment KHONG dung thu tu (seq=" + packet.seqNum + ", dang cho seq="
                             + expectedDataSeq + ") -> tam luu lai.");
                 } else {
-                    // seq nho hon mong doi -> segment da nhan roi (trung lap), bo qua phan rap
                     log("Segment TRUNG LAP (seq=" + packet.seqNum + " < dang cho " + expectedDataSeq + ") -> bo qua.");
                 }
 
-                // Du segment dung thu tu hay khong, van gui lai ACK bao
-                // "server dang cho seq nao tiep theo" (cumulative ACK, giong TCP that).
                 Packet ack = new Packet(0, expectedDataSeq, Packet.FLAG_ACK, new byte[0]);
-                sendPacket(serverSocket, ack, clientAddress);
+                NetworkSimulator.send(serverSocket, ack, clientAddress.getAddress(), clientAddress.getPort(),
+                        "Server -> Client", PacketEvent.Status.SENT);
                 log("Da gui ACK, ack=" + expectedDataSeq);
             }
 
@@ -152,11 +154,5 @@ public class Server {
                 log("Goi tin khong hop le voi trang thai hien tai, bo qua.");
             }
         }
-    }
-
-    /** Ham tien ich: dong goi va gui mot Packet toi dia chi dich. */
-    static void sendPacket(DatagramSocket socket, Packet packet, InetSocketAddress destination) throws Exception {
-        byte[] bytes = packet.encode();
-        socket.send(new DatagramPacket(bytes, bytes.length, destination.getAddress(), destination.getPort()));
     }
 }
