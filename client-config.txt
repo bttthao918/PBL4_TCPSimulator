@@ -1,0 +1,9 @@
+# File cau hinh Client - CHI CAN SUA DONG server_ip BEN DUOI
+# Dien dia chi IPv4 cua may dang chay Server (xem o cua so run_server.bat)
+server_ip=127.0.0.1
+
+# Mo phong mang (tuy chon) - de 0 neu muon demo qua mang LAN that,
+# khong can gia lap gi them vi mang that da co do tre/rui ro tu nhien.
+loss_percent=0
+delay_min_ms=0
+delay_max_ms=0

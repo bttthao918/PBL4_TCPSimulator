@@ -1,5 +1,8 @@
 package tcpsim;
 
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
@@ -12,17 +15,21 @@ import java.util.Random;
 import tcpsim.gui.PacketEvent;
 
 /**
- * Server.java (Buoc 6 - gui qua NetworkSimulator de mo phong mat goi/tre)
+ * Server.java (Buoc 6 + ho tro demo 2 may qua file cau hinh tuy chon)
  * ---------------------------------------------------------------------------
  * So voi Buoc 4, CHI THAY DOI 1 CHO: moi lan gui goi tin (SYN-ACK, ACK, FIN-ACK)
  * gio di qua NetworkSimulator.send(...) thay vi socket.send(...) truc tiep.
  * Toan bo logic bat tay / truyen du lieu / ACK giu nguyen y het Buoc 4-5.
  *
- * Cach chay co mo phong mang:
+ * LUU Y VE 2 MAY: new DatagramSocket(PORT) o day MAC DINH da lang nghe tren
+ * MOI dia chi mang cua may (khong chi localhost) - nen Server KHONG CAN sua
+ * gi them de nhan ket noi tu may khac, chi can may Client biet dung IP LAN
+ * cua may nay (xem client-config.txt) va tuong lua (firewall) khong chan cong 5005.
+ *
+ * Cach chay co mo phong mang (tuy chon, doc tu server-config.txt neu co,
+ * hoac truyen tham so dong lenh de ghi de):
  *   java -cp bin tcpsim.Server <ti_le_mat_goi_%> <do_tre_min_ms> <do_tre_max_ms>
- *   Vi du: java -cp bin tcpsim.Server 20 100 400
- *          (20% goi bi mat, moi goi con lai tre ngau nhien 100-400ms)
- *   Khong truyen tham so -> mac dinh KHONG mo phong gi (giong Buoc 4-5).
+ *   Khong truyen gi va khong co server-config.txt -> mac dinh KHONG mo phong.
  */
 public class Server {
 
@@ -44,11 +51,39 @@ public class Server {
         System.out.println("[" + LocalTime.now().format(TIME_FORMAT) + "] " + message);
     }
 
+    /** Doc file cau hinh "key=value" tuy chon - giong het ham cung ten ben Client.java. */
+    static Map<String, String> loadConfig(String fileName) {
+        Map<String, String> result = new HashMap<>();
+        java.io.File file = new java.io.File(fileName);
+        if (!file.exists()) {
+            return result; // khong co file -> dung mac dinh, khong can canh bao o Server
+        }
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    continue;
+                }
+                int equalsIndex = line.indexOf('=');
+                if (equalsIndex > 0) {
+                    result.put(line.substring(0, equalsIndex).trim(), line.substring(equalsIndex + 1).trim());
+                }
+            }
+        } catch (IOException e) {
+            log("CANH BAO: loi khi doc " + fileName + ": " + e.getMessage());
+        }
+        return result;
+    }
+
     public static void main(String[] args) throws Exception {
-        // ---------------- Doc tham so cau hinh mo phong mang (neu co) ----------------
-        double lossRate = 0.0;
-        int minDelay = 0;
-        int maxDelay = 0;
+        // ---------------- Doc file cau hinh server-config.txt (tuy chon) ----------------
+        Map<String, String> config = loadConfig("server-config.txt");
+        double lossRate = Double.parseDouble(config.getOrDefault("loss_percent", "0")) / 100.0;
+        int minDelay = Integer.parseInt(config.getOrDefault("delay_min_ms", "0"));
+        int maxDelay = Integer.parseInt(config.getOrDefault("delay_max_ms", "0"));
+
+        // Tham so dong lenh (neu co) ghi de len file cau hinh.
         if (args.length >= 3) {
             lossRate = Double.parseDouble(args[0]) / 100.0;
             minDelay = Integer.parseInt(args[1]);

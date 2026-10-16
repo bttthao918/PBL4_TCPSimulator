@@ -1,0 +1,4 @@
+# File cau hinh Server (TUY CHON - co the xoa file nay neu khong can mo phong gi)
+loss_percent=0
+delay_min_ms=0
+delay_max_ms=0

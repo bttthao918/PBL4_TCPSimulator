@@ -1,5 +1,8 @@
 package tcpsim;
 
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -16,7 +19,7 @@ import tcpsim.gui.PacketEvent;
 import tcpsim.gui.Visualizer;
 
 /**
- * Client.java (Buoc 7 - them giao dien truc quan hoa goi tin)
+ * Client.java (Buoc 7 + ho tro demo 2 may qua file cau hinh)
  * ----------------------------------------------------------------------------
  * Diem khac biet lon nhat so voi Buoc 4: viec gui du lieu, nhan ACK, va kiem tra
  * timeout gio day chay tren 3 THREAD RIENG BIET, khong con tuan tu tren 1 luong:
@@ -29,10 +32,14 @@ import tcpsim.gui.Visualizer;
  * Ca 3 thread deu doc/ghi chung mot bang "unackedSegments" -> BAT BUOC dung
  * synchronized (giong Lock/Mutex trong He dieu hanh) de tranh race condition
  * (2 thread cung sua bang mot luc gay sai du lieu).
+ *
+ * KHAC BIET MOI: dia chi IP cua Server KHONG CON HARDCODE "127.0.0.1" nua.
+ * Client doc dia chi do tu file client-config.txt (nam cung thu muc chay
+ * chuong trinh) - de khi demo tren 2 may that, chi can sua 1 dong trong
+ * file .txt do thay vi sua code va bien dich lai.
  */
 public class Client {
 
-    static final String SERVER_HOST = "127.0.0.1";
     static final int SERVER_PORT = 5005;
     static final int HANDSHAKE_TIMEOUT_MS = 2000;
     static final int MAX_HANDSHAKE_RETRIES = 5;
@@ -65,6 +72,38 @@ public class Client {
                 + "[" + Thread.currentThread().getName() + "] " + message);
     }
 
+    /**
+     * Doc mot file cau hinh dang "key=value" (moi dong 1 cap). Dong rong hoac
+     * bat dau bang '#' duoc bo qua (coi la ghi chu). Neu file khong ton tai,
+     * tra ve mot Map rong - cac gia tri mac dinh se duoc dung o noi goi ham nay.
+     */
+    static Map<String, String> loadConfig(String fileName) {
+        Map<String, String> result = new HashMap<>();
+        java.io.File file = new java.io.File(fileName);
+        if (!file.exists()) {
+            log("Khong tim thay " + fileName + " -> dung cau hinh mac dinh (127.0.0.1, khong mo phong mang).");
+            return result;
+        }
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    continue;
+                }
+                int equalsIndex = line.indexOf('=');
+                if (equalsIndex > 0) {
+                    String key = line.substring(0, equalsIndex).trim();
+                    String value = line.substring(equalsIndex + 1).trim();
+                    result.put(key, value);
+                }
+            }
+        } catch (IOException e) {
+            log("CANH BAO: loi khi doc " + fileName + ": " + e.getMessage() + " -> dung gia tri mac dinh.");
+        }
+        return result;
+    }
+
     /** Thong tin 1 segment dang cho ACK: du lieu, co, thoi diem gui gan nhat, so lan da thu lai. */
     static class SegmentInfo {
         byte[] payload;
@@ -83,13 +122,22 @@ public class Client {
     public static void main(String[] args) throws Exception {
         Thread.currentThread().setName("MainThread");
 
-        // ---------------- Doc tham so cau hinh mo phong mang (neu co) ----------------
-        // Cach chay: java -cp bin tcpsim.Client <ti_le_mat_goi_%> <do_tre_min_ms> <do_tre_max_ms>
-        // Vi du: java -cp bin tcpsim.Client 20 100 400
-        // Khong truyen gi -> mac dinh KHONG mo phong (giong Buoc 4-5).
-        double lossRate = 0.0;
-        int minDelay = 0;
-        int maxDelay = 0;
+        // ---------------- Doc file cau hinh client-config.txt ----------------
+        // Dinh dang: moi dong 1 cap "key=value", dong bat dau bang # la ghi chu.
+        //   server_ip=192.168.1.23
+        //   loss_percent=0
+        //   delay_min_ms=0
+        //   delay_max_ms=0
+        // Neu khong tim thay file, dung gia tri mac dinh (127.0.0.1, khong mo phong).
+        Map<String, String> config = loadConfig("client-config.txt");
+        String serverHost = config.getOrDefault("server_ip", "127.0.0.1");
+        double lossRate = Double.parseDouble(config.getOrDefault("loss_percent", "0")) / 100.0;
+        int minDelay = Integer.parseInt(config.getOrDefault("delay_min_ms", "0"));
+        int maxDelay = Integer.parseInt(config.getOrDefault("delay_max_ms", "0"));
+
+        // Tham so dong lenh (neu co) se GHI DE len file cau hinh - tien cho
+        // luc tu test nhanh ma khong can sua file, nhung khi demo thuc te
+        // chi can double-click file .bat, khong truyen gi ca.
         if (args.length >= 3) {
             lossRate = Double.parseDouble(args[0]) / 100.0;
             minDelay = Integer.parseInt(args[1]);
@@ -97,12 +145,15 @@ public class Client {
         }
         NetworkSimulator.configure(lossRate, minDelay, maxDelay);
 
+        log("Dia chi Server se ket noi toi: " + serverHost + ":" + SERVER_PORT
+                + "  (doc tu client-config.txt)");
+
         // Buoc 7: mo cua so truc quan hoa TRUOC KHI bat tay, de khong bo lo
         // su kien nao. Visualizer.launch() tu tao GUI tren dung thread cua Swing.
         Visualizer.launch();
 
         clientSocket = new DatagramSocket();
-        serverAddress = InetAddress.getByName(SERVER_HOST);
+        serverAddress = InetAddress.getByName(serverHost);
 
         int clientIsn = random.nextInt(1000, 9999);
         log("Client san sang, ISN = " + clientIsn);
