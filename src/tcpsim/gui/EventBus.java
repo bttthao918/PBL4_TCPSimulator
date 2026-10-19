@@ -24,6 +24,24 @@ public class EventBus {
 
     private static final ConcurrentLinkedQueue<PacketEvent> queue = new ConcurrentLinkedQueue<>();
 
+    // BUOC 3: hang doi rieng cho cac mau do cwnd, de GUI ve bieu do.
+    // Moi mau la double[]{thoi_gian_ms, cwnd, ssthresh, loai}
+    // voi loai: 0 = SLOW START, 1 = CONGESTION AVOIDANCE, 2 = TIMEOUT (mat goi).
+    private static final ConcurrentLinkedQueue<double[]> cwndQueue = new ConcurrentLinkedQueue<>();
+
+    public static void publishCwnd(double timeMs, double cwnd, double ssthresh, int type) {
+        cwndQueue.add(new double[]{timeMs, cwnd, ssthresh, type});
+    }
+
+    public static List<double[]> drainCwnd() {
+        List<double[]> result = new ArrayList<>();
+        double[] sample;
+        while ((sample = cwndQueue.poll()) != null) {
+            result.add(sample);
+        }
+        return result;
+    }
+
     /** Goi ham nay bat cu luc nao co mot su kien goi tin can hien thi. */
     public static void publish(PacketEvent event) {
         queue.add(event);

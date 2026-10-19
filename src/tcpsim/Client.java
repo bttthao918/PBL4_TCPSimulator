@@ -9,8 +9,10 @@ import java.net.InetAddress;
 import java.net.SocketTimeoutException;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
@@ -45,7 +47,14 @@ public class Client {
     static final int MAX_HANDSHAKE_RETRIES = 5;
 
     static final int SEGMENT_SIZE = 8;
-    static final String MESSAGE_TO_SEND = "Xin chao Server, day la bai PBL4 mo phong TCP!";
+    // Lap lai cau mau nhieu lan de co nhieu segment -> thay ro hieu qua cua cua so truot.
+    static final int MESSAGE_REPEAT = 8;
+    static final String MESSAGE_TO_SEND =
+            "Xin chao Server, day la bai PBL4 mo phong TCP! ".repeat(MESSAGE_REPEAT);
+
+    // BUOC 1 (cua so truot): so segment toi da duoc phep "dang bay" (da gui, chua duoc ACK).
+    // Doc tu client-config.txt (window_size=...). Bang 1 nghia la quay ve stop-and-wait.
+    static int windowSize = 4;
 
     // ---------------- Cau hinh cho retransmission ----------------
     static final long RTO_MS = 1000;                     // qua 1s khong co ACK -> gui lai
@@ -104,6 +113,78 @@ public class Client {
         return result;
     }
 
+    // =====================================================================
+    // BUOC 2: DIEU KHIEN TAC NGHEN (slow start + congestion avoidance)
+    // =====================================================================
+    // cwnd (congestion window) = so segment duoc phep "dang bay" TAI THOI DIEM NAY.
+    // Bat dau cwnd = 1, roi tu tang len khi mang on, tut xuong khi phat hien mat goi.
+    //   - SLOW START (cwnd < ssthresh):  moi ACK moi -> cwnd += 1  (gap doi moi vong RTT)
+    //   - CONGESTION AVOIDANCE (cwnd >= ssthresh): moi ACK moi -> cwnd += 1/cwnd (+1 moi RTT)
+    //   - TIMEOUT (mat goi): ssthresh = cwnd / 2, cwnd = 1 -> quay lai SLOW START
+    static class CongestionControl {
+        final boolean enabled;
+        final long startTime = System.currentTimeMillis();
+        double cwnd = 1;
+        double ssthresh;
+        long lastReductionTime = 0;
+        // Lich su (thoi gian ms, cwnd, ssthresh) - de Buoc 3 ve bieu do.
+        final List<double[]> history = new ArrayList<>();
+
+        CongestionControl(boolean enabled, double initialSsthresh) {
+            this.enabled = enabled;
+            this.ssthresh = initialSsthresh;
+            history.add(new double[]{0, cwnd, ssthresh});
+            if (enabled) EventBus.publishCwnd(0, cwnd, ssthresh, 0);
+        }
+
+        /** Kich thuoc cua so thuc te: min(cwnd, window_size). Neu tat CC thi chi la window_size. */
+        synchronized int window(int maxWindow) {
+            if (!enabled) return maxWindow;
+            return Math.max(1, Math.min((int) Math.floor(cwnd), maxWindow));
+        }
+
+        String phase() {
+            return (cwnd < ssthresh) ? "SLOW START" : "CONGESTION AVOIDANCE";
+        }
+
+        /** ReceiverThread goi khi co 'count' segment du lieu vua duoc ACK moi. */
+        synchronized void onAcked(int count, int maxWindow) {
+            if (!enabled) return;
+            for (int i = 0; i < count; i++) {
+                if (cwnd < ssthresh) cwnd += 1;
+                else cwnd += 1.0 / cwnd;
+            }
+            cwnd = Math.min(cwnd, maxWindow);
+            record(cwnd < ssthresh ? 0 : 1);
+            log(String.format("[CC] +%d ACK moi -> cwnd=%.2f ssthresh=%.0f (%s)",
+                    count, cwnd, ssthresh, phase()));
+        }
+
+        /** TimeoutThread goi khi co segment qua han RTO. Chi giam 1 lan cho moi dot mat goi. */
+        synchronized void onTimeout(long now) {
+            if (!enabled) return;
+            if (lastReductionTime != 0 && now - lastReductionTime < RTO_MS) return;
+            ssthresh = Math.max(cwnd / 2, 2);
+            cwnd = 1;
+            lastReductionTime = now;
+            record(2);
+            log(String.format("[CC] TIMEOUT (mat goi) -> ssthresh=%.0f, cwnd ve 1 (%s)", ssthresh, phase()));
+        }
+
+        // type: 0 = slow start, 1 = congestion avoidance, 2 = timeout. Dong thoi bao cho GUI ve bieu do.
+        private void record(int type) {
+            double t = System.currentTimeMillis() - startTime;
+            history.add(new double[]{t, cwnd, ssthresh});
+            EventBus.publishCwnd(t, cwnd, ssthresh, type);
+        }
+    }
+
+    static CongestionControl congestion = new CongestionControl(false, 16);
+
+    static int currentWindow() {
+        return congestion.window(windowSize);
+    }
+
     /** Thong tin 1 segment dang cho ACK: du lieu, co, thoi diem gui gan nhat, so lan da thu lai. */
     static class SegmentInfo {
         byte[] payload;
@@ -134,6 +215,15 @@ public class Client {
         double lossRate = Double.parseDouble(config.getOrDefault("loss_percent", "0")) / 100.0;
         int minDelay = Integer.parseInt(config.getOrDefault("delay_min_ms", "0"));
         int maxDelay = Integer.parseInt(config.getOrDefault("delay_max_ms", "0"));
+        windowSize = Math.max(1, Integer.parseInt(config.getOrDefault("window_size", "4")));
+        boolean ccOn = !config.getOrDefault("congestion_control", "on").equalsIgnoreCase("off");
+        double initialSsthresh = Double.parseDouble(config.getOrDefault("ssthresh", "16"));
+        congestion = new CongestionControl(ccOn, initialSsthresh);
+        log("Kich thuoc cua so toi da (window_size) = " + windowSize + " segment | dieu khien tac nghen: "
+                + (ccOn ? "BAT (ssthresh ban dau=" + (int) initialSsthresh + ")" : "TAT"));
+        if (ccOn && windowSize < 16) {
+            log("LUU Y: window_size=" + windowSize + " dang chan cwnd. Dat window_size=32 de thay slow start ro hon.");
+        }
 
         // Tham so dong lenh (neu co) se GHI DE len file cau hinh - tien cho
         // luc tu test nhanh ma khong can sua file, nhung khi demo thuc te
@@ -214,21 +304,24 @@ public class Client {
         int segmentIndex = 1;
 
         while (offset < fullData.length && !transferFailed) {
+            // BUOC 1: chi cho khi cua so DAY (so segment chua ACK da dat windowSize).
+            // Con cho trong cua so thi gui tiep NGAY, khong cho ACK cua goi truoc.
+            waitForWindowRoom();
+            if (transferFailed) break;
+
             int end = Math.min(offset + SEGMENT_SIZE, fullData.length);
             byte[] segmentPayload = new byte[end - offset];
             System.arraycopy(fullData, offset, segmentPayload, 0, segmentPayload.length);
 
             sendDataSegment(currentSeq, segmentPayload, (byte) 0, segmentIndex);
 
-            // Main thread CHO o day cho toi khi ReceiverThread bao segment
-            // nay da duoc ACK (hoac TimeoutThread bao that bai qua nhieu lan).
-            waitUntilAcked(currentSeq);
-            if (transferFailed) break;
-
             currentSeq += segmentPayload.length;
             offset = end;
             segmentIndex++;
         }
+
+        // Da dua het du lieu ra, cho TAT CA segment con lai duoc ACK roi moi gui FIN.
+        waitUntilAllAcked();
 
         if (transferFailed) {
             log("\nLOI: Truyen du lieu that bai sau nhieu lan gui lai khong thanh cong.");
@@ -251,16 +344,47 @@ public class Client {
     /** Gui 1 segment (hoac FIN) va dang ky vao unackedSegments de 2 thread kia theo doi. */
     static void sendDataSegment(int seq, byte[] payload, byte flags, int segmentIndex) throws Exception {
         Packet packet = new Packet(seq, 0, flags, payload);
-        sendRaw(packet);
 
-        // synchronized: chi 1 thread duoc sua unackedSegments tai 1 thoi diem.
+        // Ghi vao bang TRUOC khi gui: neu gui truoc, ACK co the ve nhanh hon luc ta ghi
+        // vao bang -> ReceiverThread khong tim thay gi de xoa -> segment ket lai o bang
+        // va bi gui lai thua. synchronized: chi 1 thread duoc sua bang tai 1 thoi diem.
+        int inflight;
         synchronized (unackedSegments) {
             unackedSegments.put(seq, new SegmentInfo(payload, flags, System.currentTimeMillis()));
+            inflight = unackedSegments.size();
         }
+        sendRaw(packet);
 
         String label = (flags == Packet.FLAG_FIN) ? "FIN" : ("segment #" + segmentIndex);
         log("Gui " + label + " (seq=" + seq + ")"
-                + (payload.length > 0 ? ": \"" + new String(payload) + "\"" : ""));
+                + (payload.length > 0 ? ": \"" + new String(payload) + "\"" : "")
+                + " | dang bay=" + inflight + "/" + currentWindow());
+    }
+
+    /** BUOC 1: main thread dung o day cho toi khi cua so con cho trong (hoac truyen that bai). */
+    static void waitForWindowRoom() throws InterruptedException {
+        while (!transferFailed) {
+            int inflight;
+            synchronized (unackedSegments) {
+                inflight = unackedSegments.size();
+            }
+            if (inflight < currentWindow()) {
+                return;
+            }
+            Thread.sleep(5);
+        }
+    }
+
+    /** Cho toi khi khong con segment nao chua duoc ACK. */
+    static void waitUntilAllAcked() throws InterruptedException {
+        while (!transferFailed) {
+            synchronized (unackedSegments) {
+                if (unackedSegments.isEmpty()) {
+                    return;
+                }
+            }
+            Thread.sleep(5);
+        }
     }
 
     /**
@@ -287,15 +411,21 @@ public class Client {
                 Packet response = receiveRaw();
                 if (Packet.hasFlag(response.flags, Packet.FLAG_ACK)) {
                     int ackNum = response.ackNum;
+                    int ackedData = 0; // so segment DU LIEU vua duoc ACK (de tang cwnd)
                     synchronized (unackedSegments) {
                         // Cumulative ACK: server bao "toi da nhan dung toi byte X",
                         // nen xoa MOI segment co seq < X (khong chi segment vua gui).
                         Iterator<Map.Entry<Integer, SegmentInfo>> it = unackedSegments.entrySet().iterator();
                         while (it.hasNext()) {
-                            if (it.next().getKey() < ackNum) {
+                            Map.Entry<Integer, SegmentInfo> acked = it.next();
+                            if (acked.getKey() < ackNum) {
+                                if (acked.getValue().payload.length > 0) ackedData++;
                                 it.remove();
                             }
                         }
+                    }
+                    if (ackedData > 0) {
+                        congestion.onAcked(ackedData, windowSize);
                     }
                     log("Nhan ACK, server dang cho seq=" + ackNum);
                     EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Server -> Client",
@@ -324,6 +454,7 @@ public class Client {
                     SegmentInfo info = entry.getValue();
 
                     if (now - info.sentTime >= RTO_MS) {
+                        congestion.onTimeout(now); // giam cwnd (tu gioi han: chi 1 lan moi dot mat goi)
                         if (info.retryCount >= MAX_DATA_RETRIES) {
                             log("LOI: seq=" + seq + " qua " + MAX_DATA_RETRIES
                                     + " lan gui lai van khong duoc ACK. Huy phien truyen.");

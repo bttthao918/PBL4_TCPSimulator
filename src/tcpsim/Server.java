@@ -40,6 +40,7 @@ public class Server {
     static int serverIsn;
     static int expectedClientSeq;
     static int expectedDataSeq;
+    static int lastFinSeq = -1; // seq cua goi FIN cua phien truoc (de tra loi lai neu ACK-cua-FIN bi mat)
 
     static final Map<Integer, byte[]> outOfOrderBuffer = new HashMap<>();
     static final StringBuilder receivedData = new StringBuilder();
@@ -109,6 +110,45 @@ public class Server {
             Packet packet = Packet.decode(rawData, length);
             log("Nhan goi tu " + clientAddress + " | " + packet + " | state=" + connectionState);
 
+            // ---------------- SUA LOI 1: SYN-ACK bi mat -> Client gui lai SYN ----------------
+            // Server dang o SYN_RECEIVED ma lai nhan SYN cung seq -> gui lai SYN-ACK cu.
+            if (Packet.hasFlag(packet.flags, Packet.FLAG_SYN)
+                    && !Packet.hasFlag(packet.flags, Packet.FLAG_ACK)
+                    && connectionState.equals("SYN_RECEIVED")
+                    && packet.seqNum == expectedClientSeq) {
+                Packet synAckAgain = new Packet(serverIsn, expectedClientSeq + 1,
+                        (byte) (Packet.FLAG_SYN | Packet.FLAG_ACK), new byte[0]);
+                NetworkSimulator.send(serverSocket, synAckAgain, clientAddress.getAddress(), clientAddress.getPort(),
+                        "Server -> Client", PacketEvent.Status.RETRANSMITTED);
+                log("Nhan lai SYN (SYN-ACK truoc do co the bi mat) -> gui lai SYN-ACK.");
+                continue;
+            }
+
+            // ---------------- SUA LOI 2: ACK cuoi cua bat tay bi mat ----------------
+            // Client da tuong la xong bat tay nen gui du lieu (hoac FIN) luon.
+            // Neu goi do co dung seq = ISN_client + 1 thi coi nhu bat tay da xong.
+            if (connectionState.equals("SYN_RECEIVED")
+                    && !Packet.hasFlag(packet.flags, Packet.FLAG_SYN)
+                    && packet.flags != Packet.FLAG_ACK
+                    && packet.seqNum == expectedClientSeq + 1) {
+                connectionState = "ESTABLISHED";
+                expectedDataSeq = packet.seqNum;
+                receivedData.setLength(0);
+                outOfOrderBuffer.clear();
+                log(">>> ACK cuoi cua bat tay bi mat, nhung nhan duoc du lieu hop le -> coi nhu ESTABLISHED <<<");
+            }
+
+            // ---------------- SUA LOI 3: ACK cua FIN bi mat -> Client gui lai FIN ----------------
+            if (Packet.hasFlag(packet.flags, Packet.FLAG_FIN)
+                    && connectionState.equals("CLOSED")
+                    && packet.seqNum == lastFinSeq) {
+                Packet finAckAgain = new Packet(0, packet.seqNum + 1, Packet.FLAG_ACK, new byte[0]);
+                NetworkSimulator.send(serverSocket, finAckAgain, clientAddress.getAddress(), clientAddress.getPort(),
+                        "Server -> Client", PacketEvent.Status.RETRANSMITTED);
+                log("Nhan lai FIN (ACK truoc do co the bi mat) -> gui lai ACK cua FIN.");
+                continue;
+            }
+
             // ---------------- BAT TAY (giong Buoc 3) ----------------
             if (Packet.hasFlag(packet.flags, Packet.FLAG_SYN)
                     && !Packet.hasFlag(packet.flags, Packet.FLAG_ACK)
@@ -153,6 +193,11 @@ public class Server {
                 NetworkSimulator.send(serverSocket, finAck, clientAddress.getAddress(), clientAddress.getPort(),
                         "Server -> Client", PacketEvent.Status.SENT);
                 log("Da gui ACK xac nhan FIN. Phien truyen du lieu ket thuc.");
+
+                // SUA LOI 4: dong phien -> ve CLOSED de chap nhan Client moi (khong can tat/mo lai Server).
+                lastFinSeq = packet.seqNum;
+                connectionState = "CLOSED";
+                log("Trang thai ket noi: " + connectionState + " (san sang nhan ket noi moi)");
             }
 
             // ---------------- GOI DU LIEU BINH THUONG ----------------
