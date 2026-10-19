@@ -42,6 +42,25 @@ public class EventBus {
         return result;
     }
 
+    // BUOC 4: hang doi bao cao ket qua phien (moi phien ket thuc dua len 1 bao cao).
+    private static final ConcurrentLinkedQueue<SessionReport> reportQueue = new ConcurrentLinkedQueue<>();
+
+    public static void publishReport(SessionReport report) {
+        reportQueue.add(report);
+    }
+
+    /** Lay bao cao cu nhat dang cho (hoac null neu chua co). */
+    public static SessionReport pollReport() {
+        return reportQueue.poll();
+    }
+
+    /** BUOC 5: xoa sach moi du lieu cu truoc khi chay phien moi. */
+    public static void clearAll() {
+        drainAll();
+        drainCwnd();
+        reportQueue.clear();
+    }
+
     /** Goi ham nay bat cu luc nao co mot su kien goi tin can hien thi. */
     public static void publish(PacketEvent event) {
         queue.add(event);

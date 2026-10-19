@@ -40,6 +40,9 @@ public class Server {
     static int serverIsn;
     static int expectedClientSeq;
     static int expectedDataSeq;
+    // BUOC 4: bao cao 'toi da rap duoc N byte, CRC32 = ...' gui kem trong ACK cua FIN,
+    // de Client tu kiem tra du lieu den noi co DUNG khong (ke ca khi demo 2 may).
+    static byte[] lastFinAckPayload = new byte[0];
     static int lastFinSeq = -1; // seq cua goi FIN cua phien truoc (de tra loi lai neu ACK-cua-FIN bi mat)
 
     static final Map<Integer, byte[]> outOfOrderBuffer = new HashMap<>();
@@ -142,7 +145,7 @@ public class Server {
             if (Packet.hasFlag(packet.flags, Packet.FLAG_FIN)
                     && connectionState.equals("CLOSED")
                     && packet.seqNum == lastFinSeq) {
-                Packet finAckAgain = new Packet(0, packet.seqNum + 1, Packet.FLAG_ACK, new byte[0]);
+                Packet finAckAgain = new Packet(0, packet.seqNum + 1, Packet.FLAG_ACK, lastFinAckPayload);
                 NetworkSimulator.send(serverSocket, finAckAgain, clientAddress.getAddress(), clientAddress.getPort(),
                         "Server -> Client", PacketEvent.Status.RETRANSMITTED);
                 log("Nhan lai FIN (ACK truoc do co the bi mat) -> gui lai ACK cua FIN.");
@@ -189,7 +192,14 @@ public class Server {
                 log("=== DU LIEU DA RAP DUOC (" + receivedData.length() + " ky tu) ===");
                 log("\"" + receivedData + "\"");
 
-                Packet finAck = new Packet(0, packet.seqNum + 1, Packet.FLAG_ACK, new byte[0]);
+                byte[] assembled = receivedData.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+                crc.update(assembled);
+                String report = "len=" + assembled.length + ";crc=" + Long.toHexString(crc.getValue());
+                lastFinAckPayload = report.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                log("Bao cao gui kem ACK cua FIN: " + report);
+
+                Packet finAck = new Packet(0, packet.seqNum + 1, Packet.FLAG_ACK, lastFinAckPayload);
                 NetworkSimulator.send(serverSocket, finAck, clientAddress.getAddress(), clientAddress.getPort(),
                         "Server -> Client", PacketEvent.Status.SENT);
                 log("Da gui ACK xac nhan FIN. Phien truyen du lieu ket thuc.");

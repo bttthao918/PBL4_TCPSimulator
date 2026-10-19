@@ -22,6 +22,9 @@ import tcpsim.gui.PacketEvent;
  */
 public class NetworkSimulator {
 
+    /** BUOC 4: so goi bi mat (gia lap) ke tu lan configure() gan nhat - de thong ke cuoi phien. */
+    public static final java.util.concurrent.atomic.AtomicInteger lostCount = new java.util.concurrent.atomic.AtomicInteger();
+
     static double packetLossRate = 0.0;
     static int minDelayMs = 0;
     static int maxDelayMs = 0;
@@ -31,6 +34,7 @@ public class NetworkSimulator {
 
     public static void configure(double lossRate, int minDelay, int maxDelay) {
         packetLossRate = lossRate;
+        lostCount.set(0);
         minDelayMs = minDelay;
         maxDelayMs = maxDelay;
         log(String.format(
@@ -56,6 +60,7 @@ public class NetworkSimulator {
 
         // ---- Buoc 1: quyet dinh co huy goi nay khong ----
         if (random.nextDouble() < packetLossRate) {
+            lostCount.incrementAndGet();
             log("[DROPPED] seq=" + packet.seqNum + " " + packet.flagsToString()
                     + " -> goi tin bi mat tren duong truyen (mo phong).");
             EventBus.publish(new PacketEvent(
