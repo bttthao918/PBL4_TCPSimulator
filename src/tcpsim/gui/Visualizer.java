@@ -1,23 +1,23 @@
 package tcpsim.gui;
 
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
+import java.awt.geom.Path2D;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Visualizer.java (Buoc 3 + 4 + 5)
- * --------------------------------
- * Cua so do hoa (Swing) gom, tu tren xuong duoi:
- *   0. BANG DIEU KHIEN (Buoc 5): sua IP Server, ti le mat goi, do tre, cua so toi da,
- *      ssthresh, do dai du lieu, bat/tat dieu khien tac nghen, va nut "Chay lai".
- *   1. THANH TRANG THAI: cwnd, ssthresh, giai doan hien tai + bo dem goi tin.
- *   2. KHUNG KET QUA (Buoc 4): thong ke cuoi phien (thanh cong?, du lieu dung?, thoi gian,
- *      toc do, so lan gui lai...).
- *   3. SO DO TRINH TU (trai) va BIEU DO cwnd (phai).
- *   4. BANG LOG (duoi cung).
+ * Visualizer.java (giao dien ban 6 - gon gang hon)
+ * ------------------------------------------------
+ * Bo cuc:
+ *   - COT TRAI:   CAU HINH (sua tham so, nut "Chay lai") va KET QUA (thong ke cuoi phien).
+ *   - DAI TREN:   trang thai SONG: giai doan (slow start / congestion avoidance / timeout),
+ *                 cwnd, ssthresh va bo dem goi tin.
+ *   - O GIUA:     2 tab. Tab 1 "Truc quan hoa" = so do trinh tu + bieu do cwnd.
+ *                 Tab 2 "Nhat ky goi tin" = bang log chi tiet.
  *
  * GUI khong biet gi ve TCP: khi bam "Chay lai" no chi goi SessionRunner.runSession(...)
  * tren mot thread rieng (do Client cung cap) va doi bao cao ket qua tu EventBus.
@@ -27,16 +27,24 @@ public class Visualizer {
     private static final int MAX_EVENTS_KEPT = 500;
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
+    // Bang mau thong nhat
+    private static final Color BLUE = new Color(33, 102, 214);
+    private static final Color GREEN = new Color(46, 125, 50);
+    private static final Color RED = new Color(198, 40, 40);
+    private static final Color ORANGE = new Color(239, 130, 0);
+    private static final Color GRAY = new Color(130, 130, 130);
+    private static final Color TEXT_MUTED = new Color(110, 110, 110);
+    private static final Color PANEL_BG = new Color(246, 247, 249);
+    private static final Color LINE = new Color(220, 223, 228);
+
     private final SessionRunner runner;
 
     private final JFrame frame;
     private final DiagramPanel diagramPanel;
     private final ChartPanel chartPanel;
     private final DefaultTableModel tableModel;
-    private final JLabel statusLabel;
-    private final JLabel resultLabel;
 
-    // ---- Bang dieu khien ----
+    // ---- Cot cau hinh ----
     private final JTextField ipField;
     private final JSpinner lossSpinner;
     private final JSpinner delayMinSpinner;
@@ -47,7 +55,19 @@ public class Visualizer {
     private final JCheckBox ccCheck;
     private final JButton runButton;
 
-    // So lieu dem hien tren thanh trang thai
+    // ---- Cot ket qua ----
+    private final JLabel resultBadge;
+    private final JLabel reasonLabel;
+    private final JLabel valData, valTime, valPhases, valSpeed, valSegments, valSends, valRetrans, valLost,
+            valCwndDrops, valCwndMax;
+
+    // ---- Dai trang thai song ----
+    private final JLabel phaseBadge;
+    private final JLabel cwndLabel;
+    private final JLabel ssthreshLabel;
+    private final JLabel countersLabel;
+
+    // So lieu dem
     private int sentCount = 0;
     private int retransCount = 0;
     private int lostCount = 0;
@@ -57,13 +77,14 @@ public class Visualizer {
     private Visualizer(SessionSettings initial, SessionRunner runner) {
         this.runner = runner;
 
-        frame = new JFrame("Mo phong TCP - Truc quan hoa goi tin (PBL4)");
+        frame = new JFrame("Mo phong giao thuc TCP");
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-        frame.setSize(1100, 840);
+        frame.setSize(1260, 800);
+        frame.setMinimumSize(new Dimension(1000, 640));
         frame.setLayout(new BorderLayout());
 
-        // ---- 0. Bang dieu khien (2 hang) ----
-        ipField = new JTextField(initial.serverIp, 11);
+        // ================= Cac o nhap =================
+        ipField = new JTextField(initial.serverIp);
         ipField.setName("ipField");
         lossSpinner = spinner("lossSpinner", initial.lossPercent, 0, 90, 5);
         delayMinSpinner = spinner("delayMinSpinner", initial.delayMinMs, 0, 3000, 50);
@@ -71,71 +92,127 @@ public class Visualizer {
         windowSpinner = spinner("windowSpinner", initial.windowSize, 1, 64, 1);
         ssthreshSpinner = spinner("ssthreshSpinner", initial.ssthresh, 2, 64, 1);
         sizeSpinner = spinner("sizeSpinner", initial.messageRepeat, 1, 100, 1);
-        ccCheck = new JCheckBox("Dieu khien tac nghen (slow start)", initial.congestionControl);
+        ccCheck = new JCheckBox("Bat dieu khien tac nghen", initial.congestionControl);
         ccCheck.setName("ccCheck");
-        runButton = new JButton("Chay lai");
+        ccCheck.setOpaque(false);
+        runButton = new AccentButton("Chay lai");
         runButton.setName("runButton");
-        runButton.setFont(runButton.getFont().deriveFont(Font.BOLD, 13f));
         runButton.addActionListener(e -> startSession());
 
         sizeSpinner.setToolTipText("Moi don vi = 47 byte (1 cau mau). Vi du 8 -> 376 byte -> 47 segment.");
-        delayMaxSpinner.setToolTipText("Neu nho hon do tre min thi se duoc nang len bang do tre min.");
+        delayMaxSpinner.setToolTipText("Neu nho hon tre min thi se duoc nang len bang tre min.");
         windowSpinner.setToolTipText("Gioi han tren cua cwnd (so segment toi da dang bay).");
 
-        JPanel row1 = row();
-        row1.add(new JLabel("Server IP:"));
-        row1.add(ipField);
-        row1.add(new JLabel("   Mat goi (%):"));
-        row1.add(lossSpinner);
-        row1.add(new JLabel("   Tre min (ms):"));
-        row1.add(delayMinSpinner);
-        row1.add(new JLabel("   Tre max (ms):"));
-        row1.add(delayMaxSpinner);
+        // ================= Cot ben trai =================
+        JPanel side = new JPanel();
+        side.setLayout(new BoxLayout(side, BoxLayout.Y_AXIS));
+        side.setBackground(PANEL_BG);
+        side.setBorder(new EmptyBorder(14, 16, 14, 14));
+        side.setPreferredSize(new Dimension(290, 100));
 
-        JPanel row2 = row();
-        row2.add(new JLabel("Cua so toi da:"));
-        row2.add(windowSpinner);
-        row2.add(new JLabel("   ssthresh:"));
-        row2.add(ssthreshSpinner);
-        row2.add(new JLabel("   Du lieu (x47 byte):"));
-        row2.add(sizeSpinner);
-        row2.add(Box.createHorizontalStrut(10));
-        row2.add(ccCheck);
-        row2.add(Box.createHorizontalStrut(14));
-        row2.add(runButton);
+        side.add(sectionTitle("CAU HINH"));
+        JPanel form = new JPanel(new GridBagLayout());
+        form.setOpaque(false);
+        int r = 0;
+        addFormRow(form, r++, "Server IP", ipField);
+        addFormRow(form, r++, "Mat goi (%)", lossSpinner);
+        addFormRow(form, r++, "Tre min (ms)", delayMinSpinner);
+        addFormRow(form, r++, "Tre max (ms)", delayMaxSpinner);
+        addFormRow(form, r++, "Cua so toi da", windowSpinner);
+        addFormRow(form, r++, "ssthresh", ssthreshSpinner);
+        addFormRow(form, r++, "Du lieu (x47 byte)", sizeSpinner);
+        left(form);
+        side.add(form);
+        side.add(Box.createVerticalStrut(4));
+        left(ccCheck);
+        side.add(ccCheck);
+        side.add(Box.createVerticalStrut(10));
+        left(runButton);
+        runButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        side.add(runButton);
 
-        // ---- 1. Thanh trang thai + 2. Khung ket qua ----
-        statusLabel = new JLabel(" Dang cho du lieu...");
-        statusLabel.setName("statusLabel");
-        statusLabel.setFont(statusLabel.getFont().deriveFont(Font.BOLD, 13f));
-        statusLabel.setOpaque(true);
-        statusLabel.setBackground(new Color(235, 241, 250));
-        statusLabel.setBorder(BorderFactory.createEmptyBorder(7, 10, 7, 10));
+        side.add(Box.createVerticalStrut(20));
+        side.add(sectionTitle("KET QUA"));
 
-        resultLabel = new JLabel(resultPlaceholder("Ket qua phien se hien o day sau khi truyen xong."));
-        resultLabel.setName("resultLabel");
-        resultLabel.setFont(resultLabel.getFont().deriveFont(Font.PLAIN, 13f));
-        resultLabel.setOpaque(true);
-        resultLabel.setBackground(new Color(245, 245, 245));
-        resultLabel.setBorder(BorderFactory.createEmptyBorder(7, 10, 7, 10));
+        resultBadge = new JLabel("SAN SANG");
+        resultBadge.setName("resultBadge");
+        resultBadge.setOpaque(true);
+        resultBadge.setHorizontalAlignment(SwingConstants.CENTER);
+        resultBadge.setFont(resultBadge.getFont().deriveFont(Font.BOLD, 15f));
+        resultBadge.setForeground(Color.WHITE);
+        resultBadge.setBackground(GRAY);
+        resultBadge.setBorder(new EmptyBorder(7, 8, 7, 8));
+        left(resultBadge);
+        resultBadge.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
+        side.add(resultBadge);
 
-        Box top = Box.createVerticalBox();
-        for (JComponent c : new JComponent[]{row1, row2, statusLabel, resultLabel}) {
-            c.setAlignmentX(Component.LEFT_ALIGNMENT);
-            c.setMaximumSize(new Dimension(Integer.MAX_VALUE, c.getPreferredSize().height));
-            top.add(c);
-        }
-        frame.add(top, BorderLayout.NORTH);
+        reasonLabel = new JLabel(" ");
+        reasonLabel.setName("reasonLabel");
+        reasonLabel.setFont(reasonLabel.getFont().deriveFont(Font.PLAIN, 12f));
+        reasonLabel.setForeground(RED);
+        reasonLabel.setBorder(new EmptyBorder(4, 2, 2, 2));
+        reasonLabel.setVisible(false);
+        left(reasonLabel);
+        side.add(reasonLabel);
 
-        // ---- 3. So do trinh tu (trai) va bieu do cwnd (phai) ----
+        JPanel metrics = new JPanel(new GridBagLayout());
+        metrics.setOpaque(false);
+        int m = 0;
+        valData = metricRow(metrics, m++, "Du lieu", "valData");
+        valTime = metricRow(metrics, m++, "Tong thoi gian", "valTime");
+        valPhases = metricRow(metrics, m++, "Bat tay + truyen", "valPhases");
+        valSpeed = metricRow(metrics, m++, "Toc do", "valSpeed");
+        valSegments = metricRow(metrics, m++, "So segment", "valSegments");
+        valSends = metricRow(metrics, m++, "Tong luot gui", "valSends");
+        valRetrans = metricRow(metrics, m++, "Gui lai", "valRetrans");
+        valLost = metricRow(metrics, m++, "Mat goi gia lap", "valLost");
+        valCwndDrops = metricRow(metrics, m++, "cwnd giam (timeout)", "valCwndDrops");
+        valCwndMax = metricRow(metrics, m++, "cwnd lon nhat", "valCwndMax");
+        metrics.setBorder(new EmptyBorder(8, 0, 0, 0));
+        left(metrics);
+        side.add(metrics);
+        side.add(Box.createVerticalGlue());
+
+        frame.add(side, BorderLayout.WEST);
+
+        // ================= Dai trang thai song (phia tren) =================
+        JPanel strip = new JPanel(new FlowLayout(FlowLayout.LEFT, 14, 9));
+        strip.setBackground(Color.WHITE);
+        strip.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, LINE));
+        phaseBadge = new JLabel("CHUA CHAY");
+        phaseBadge.setOpaque(true);
+        phaseBadge.setForeground(Color.WHITE);
+        phaseBadge.setBackground(GRAY);
+        phaseBadge.setFont(phaseBadge.getFont().deriveFont(Font.BOLD, 12f));
+        phaseBadge.setBorder(new EmptyBorder(4, 10, 4, 10));
+        cwndLabel = new JLabel();
+        ssthreshLabel = new JLabel();
+        countersLabel = new JLabel();
+        countersLabel.setForeground(TEXT_MUTED);
+        strip.add(phaseBadge);
+        strip.add(cwndLabel);
+        strip.add(ssthreshLabel);
+        strip.add(Box.createHorizontalStrut(30));
+        strip.add(countersLabel);
+        updateStatusBar();
+
+        // ================= Phan giua: 2 tab =================
         diagramPanel = new DiagramPanel();
         chartPanel = new ChartPanel();
-        JPanel center = new JPanel(new GridLayout(1, 2, 6, 0));
-        center.add(diagramPanel);
-        center.add(chartPanel);
-        frame.add(center, BorderLayout.CENTER);
 
-        // ---- 4. Bang log ----
+        JPanel visual = new JPanel(new GridBagLayout());
+        visual.setBackground(Color.WHITE);
+        GridBagConstraints gc = new GridBagConstraints();
+        gc.fill = GridBagConstraints.BOTH;
+        gc.weighty = 1;
+        gc.gridy = 0;
+        gc.gridx = 0;
+        gc.weightx = 0.42;
+        visual.add(diagramPanel, gc);
+        gc.gridx = 1;
+        gc.weightx = 0.58;
+        visual.add(chartPanel, gc);
+
         String[] columns = {"Thoi gian", "Chieu", "Loai goi", "Seq", "Ack", "Trang thai", "Ghi chu"};
         tableModel = new DefaultTableModel(columns, 0) {
             @Override
@@ -145,9 +222,18 @@ public class Visualizer {
         };
         JTable table = new JTable(tableModel);
         table.setFillsViewportHeight(true);
-        JScrollPane scrollPane = new JScrollPane(table);
-        scrollPane.setPreferredSize(new Dimension(1100, 170));
-        frame.add(scrollPane, BorderLayout.SOUTH);
+        table.setRowHeight(24);
+        JScrollPane logScroll = new JScrollPane(table);
+        logScroll.setBorder(null);
+
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab("Truc quan hoa", visual);
+        tabs.addTab("Nhat ky goi tin", logScroll);
+
+        JPanel centerWrap = new JPanel(new BorderLayout());
+        centerWrap.add(strip, BorderLayout.NORTH);
+        centerWrap.add(tabs, BorderLayout.CENTER);
+        frame.add(centerWrap, BorderLayout.CENTER);
 
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
@@ -159,20 +245,116 @@ public class Visualizer {
         startSession();
     }
 
+    // =====================================================================
+    // Dung giao dien
+    // =====================================================================
     private static JSpinner spinner(String name, int value, int min, int max, int step) {
         JSpinner sp = new JSpinner(new SpinnerNumberModel(Math.max(min, Math.min(max, value)), min, max, step));
         sp.setName(name);
-        ((JSpinner.DefaultEditor) sp.getEditor()).getTextField().setColumns(4);
         return sp;
     }
 
-    private static JPanel row() {
-        return new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+    private static void left(JComponent c) {
+        c.setAlignmentX(Component.LEFT_ALIGNMENT);
+    }
+
+    private static JLabel sectionTitle(String text) {
+        JLabel l = new JLabel(text);
+        l.setFont(l.getFont().deriveFont(Font.BOLD, 12f));
+        l.setForeground(TEXT_MUTED);
+        l.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, LINE), new EmptyBorder(0, 0, 6, 0)));
+        left(l);
+        l.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+        return l;
+    }
+
+    private static void addFormRow(JPanel form, int row, String label, JComponent field) {
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridy = row;
+        c.insets = new Insets(5, 0, 5, 8);
+        c.anchor = GridBagConstraints.WEST;
+        c.gridx = 0;
+        c.weightx = 0;
+        JLabel l = new JLabel(label);
+        l.setForeground(new Color(60, 60, 60));
+        form.add(l, c);
+        c.gridx = 1;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(5, 0, 5, 0);
+        form.add(field, c);
+    }
+
+    private static JLabel metricRow(JPanel panel, int row, String label, String valueName) {
+        GridBagConstraints c = new GridBagConstraints();
+        c.gridy = row;
+        c.anchor = GridBagConstraints.WEST;
+        c.insets = new Insets(3, 0, 3, 10);
+        c.gridx = 0;
+        JLabel l = new JLabel(label);
+        l.setForeground(TEXT_MUTED);
+        l.setFont(l.getFont().deriveFont(Font.PLAIN, 12f));
+        panel.add(l, c);
+        c.gridx = 1;
+        c.weightx = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(3, 0, 3, 0);
+        JLabel v = new JLabel("-");
+        v.setName(valueName);
+        v.setFont(v.getFont().deriveFont(Font.BOLD, 13f));
+        panel.add(v, c);
+        return v;
+    }
+
+    /** Nut chinh mau xanh, bo goc (tu ve de khong phu thuoc kieu giao dien he thong). */
+    private static class AccentButton extends JButton {
+        AccentButton(String text) {
+            super(text);
+            setContentAreaFilled(false);
+            setFocusPainted(false);
+            setBorderPainted(false);
+            setOpaque(false);
+            setForeground(Color.WHITE);
+            setFont(getFont().deriveFont(Font.BOLD, 14f));
+            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            Color c = !isEnabled() ? new Color(176, 180, 186)
+                    : getModel().isPressed() ? BLUE.darker() : BLUE;
+            g2.setColor(c);
+            g2.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
+            g2.setColor(Color.WHITE);
+            g2.setFont(getFont());
+            FontMetrics fm = g2.getFontMetrics();
+            String t = getText();
+            g2.drawString(t, (getWidth() - fm.stringWidth(t)) / 2,
+                    (getHeight() - fm.getHeight()) / 2 + fm.getAscent());
+            g2.dispose();
+        }
     }
 
     /** Mo cua so truc quan hoa (goi tu bat ky thread nao). Phien dau tien tu chay ngay. */
     public static void launch(SessionSettings initial, SessionRunner runner) {
-        SwingUtilities.invokeLater(() -> new Visualizer(initial, runner));
+        SwingUtilities.invokeLater(() -> {
+            try {
+                // Nimbus: hien dai hon kieu Swing mac dinh va nhu nhau tren moi may.
+                for (UIManager.LookAndFeelInfo info : UIManager.getInstalledLookAndFeels()) {
+                    if ("Nimbus".equals(info.getName())) {
+                        UIManager.put("defaultFont", new Font(Font.SANS_SERIF, Font.PLAIN, 13));
+                        UIManager.setLookAndFeel(info.getClassName());
+                        break;
+                    }
+                }
+            } catch (Exception ignored) {
+                // Khong doi duoc kieu giao dien thi dung kieu mac dinh, khong sao ca.
+            }
+            new Visualizer(initial, runner);
+        });
     }
 
     // =====================================================================
@@ -203,8 +385,11 @@ public class Visualizer {
         SessionSettings settings = readSettings();
         reset();
         runButton.setEnabled(false);
-        resultLabel.setBackground(new Color(255, 248, 225));
-        resultLabel.setText(resultPlaceholder("Dang chay..."));
+        resultBadge.setText("DANG CHAY...");
+        resultBadge.setBackground(ORANGE);
+        reasonLabel.setText(" ");
+        reasonLabel.setVisible(false);
+        clearMetrics();
 
         Thread worker = new Thread(() -> {
             try {
@@ -290,70 +475,79 @@ public class Visualizer {
     }
 
     private void updateStatusBar() {
-        String cc;
         if (lastSample == null) {
-            cc = "Dieu khien tac nghen: chua co du lieu (hoac dang TAT)";
+            phaseBadge.setText("CHUA CO DU LIEU");
+            phaseBadge.setBackground(GRAY);
+            cwndLabel.setText("");
+            ssthreshLabel.setText("");
         } else {
-            cc = String.format("cwnd = %.2f   |   ssthresh = %.0f   |   %s",
-                    lastSample[1], lastSample[2], phaseName((int) lastSample[3]));
+            int type = (int) lastSample[3];
+            phaseBadge.setText(phaseName(type));
+            phaseBadge.setBackground(type == 0 ? BLUE : type == 1 ? GREEN : RED);
+            cwndLabel.setText(String.format("<html>cwnd <b>%.2f</b></html>", lastSample[1]));
+            ssthreshLabel.setText(String.format("<html>ssthresh <b>%.0f</b></html>", lastSample[2]));
         }
-        statusLabel.setText(" " + cc + "          ||          Da gui: " + sentCount
-                + "   Gui lai: " + retransCount + "   Mat goi: " + lostCount + "   ACK nhan: " + ackCount);
+        countersLabel.setText("Da gui " + sentCount + "     Gui lai " + retransCount
+                + "     Mat goi " + lostCount + "     ACK nhan " + ackCount);
     }
 
     // =====================================================================
-    // KHUNG KET QUA (BUOC 4)
+    // CAT KET QUA (BUOC 4)
     // =====================================================================
-    private static String resultPlaceholder(String text) {
-        return "<html>&nbsp;" + text + "<br>&nbsp;</html>";
+    private void clearMetrics() {
+        for (JLabel v : new JLabel[]{valData, valTime, valPhases, valSpeed, valSegments, valSends,
+                valRetrans, valLost, valCwndDrops, valCwndMax}) {
+            v.setText("-");
+            v.setForeground(Color.BLACK);
+        }
     }
 
     private void showReport(SessionReport r) {
-        String ok = "#1b7a1b";
-        String bad = "#c62828";
-        String line1;
-        if (r.success) {
-            line1 = "<b><font color='" + ok + "'>KET QUA: THANH CONG</font></b>";
-        } else {
-            line1 = "<b><font color='" + bad + "'>KET QUA: THAT BAI</font></b> - " + r.failReason;
-        }
+        clearMetrics();
+        resultBadge.setText(r.success ? "THANH CONG" : "THAT BAI");
+        resultBadge.setBackground(r.success ? GREEN : RED);
+        reasonLabel.setText(r.success ? " "
+                : "<html><div style='width:230px'>" + r.failReason + "</div></html>");
+        reasonLabel.setVisible(!r.success);
 
-        if (r.success || !r.dataCheck.equals("KHONG_XAC_MINH")) {
-            String check;
-            switch (r.dataCheck) {
-                case "DUNG":
-                    check = "<b><font color='" + ok + "'>DUNG</font></b> (" + r.payloadBytes
-                            + " byte, CRC32 khop voi Server)";
-                    break;
-                case "SAI":
-                    check = "<b><font color='" + bad + "'>SAI</font></b>";
-                    break;
-                default:
-                    check = "chua xac minh (Server khong gui bao cao)";
-                    break;
-            }
-            line1 += "   |   Du lieu: " + check;
+        switch (r.dataCheck) {
+            case "DUNG":
+                valData.setText("DUNG (khop)");
+                valData.setToolTipText("Server rap duoc dung do dai va CRC32 cua du lieu da gui");
+                valData.setForeground(GREEN);
+                break;
+            case "SAI":
+                valData.setText("SAI");
+                valData.setForeground(RED);
+                break;
+            default:
+                valData.setText("chua xac minh");
+                valData.setForeground(TEXT_MUTED);
+                break;
         }
 
         if (r.transferMs > 0) {
-            double sec = r.transferMs / 1000.0;
-            line1 += String.format("   |   Thoi gian: %.1f s (bat tay %.1f s + truyen %.1f s)",
-                    (r.handshakeMs + r.transferMs) / 1000.0, r.handshakeMs / 1000.0, sec);
+            double hs = r.handshakeMs / 1000.0;
+            double tr = r.transferMs / 1000.0;
+            valTime.setText(String.format("%.1f s", hs + tr));
+            valPhases.setText(String.format("%.1f s + %.1f s", hs, tr));
             if (r.success) {
-                line1 += String.format("   |   Toc do: %.0f byte/s", r.payloadBytes / Math.max(sec, 0.001));
+                valSpeed.setText(String.format("%.0f byte/s", r.payloadBytes / Math.max(tr, 0.001)));
             }
         }
 
         double retransPct = r.dataTransmissions == 0 ? 0 : 100.0 * r.retransmissions / r.dataTransmissions;
-        String line2 = String.format("Segment: %d   |   Tong luot gui: %d   |   Gui lai: %d (%.0f%%)   |   Mat goi gia lap: %d",
-                r.segments, r.dataTransmissions, r.retransmissions, retransPct, r.lostPackets);
+        valSegments.setText(r.segments + "  (" + r.payloadBytes + " byte)");
+        valSends.setText(String.valueOf(r.dataTransmissions));
+        valRetrans.setText(String.format("%d  (%.0f%%)", r.retransmissions, retransPct));
+        valLost.setText(String.valueOf(r.lostPackets));
         if (r.ccEnabled) {
-            line2 += String.format("   |   cwnd giam do timeout: %d lan   |   cwnd lon nhat: %.1f",
-                    r.cwndReductions, r.maxCwnd);
+            valCwndDrops.setText(r.cwndReductions + " lan");
+            valCwndMax.setText(String.format("%.1f", r.maxCwnd));
+        } else {
+            valCwndDrops.setText("tat");
+            valCwndMax.setText("tat");
         }
-
-        resultLabel.setBackground(r.success ? new Color(232, 245, 233) : new Color(253, 236, 234));
-        resultLabel.setText("<html>&nbsp;" + line1 + "<br>&nbsp;" + line2 + "</html>");
     }
 
     // =====================================================================
@@ -363,7 +557,7 @@ public class Visualizer {
         switch (type) {
             case 0: return "SLOW START";
             case 1: return "CONGESTION AVOIDANCE";
-            case 2: return "TIMEOUT -> cwnd ve 1";
+            case 2: return "TIMEOUT - cwnd ve 1";
             default: return "?";
         }
     }
@@ -380,10 +574,10 @@ public class Visualizer {
 
     private static Color colorFor(PacketEvent.Status status) {
         switch (status) {
-            case SENT: return new Color(120, 120, 120);
-            case ACKED: return new Color(34, 139, 34);
-            case LOST: return new Color(200, 30, 30);
-            case RETRANSMITTED: return new Color(230, 140, 0);
+            case SENT: return new Color(110, 118, 130);
+            case ACKED: return GREEN;
+            case LOST: return RED;
+            case RETRANSMITTED: return ORANGE;
             default: return Color.BLACK;
         }
     }
@@ -392,11 +586,12 @@ public class Visualizer {
     // SO DO TRINH TU
     // =====================================================================
     private static class DiagramPanel extends JPanel {
-        private static final int ROW_HEIGHT = 22;
+        private static final int ROW_HEIGHT = 30;
         private final List<PacketEvent> events = new ArrayList<>();
 
         DiagramPanel() {
             setBackground(Color.WHITE);
+            setBorder(new EmptyBorder(0, 0, 0, 0));
         }
 
         void addEvent(PacketEvent event) {
@@ -415,77 +610,110 @@ public class Visualizer {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
             int width = getWidth();
             int height = getHeight();
-            int leftX = width / 4;
-            int rightX = (width * 3) / 4;
-            int topY = 40;
-            int bottomY = height - 30; // chua cho cho chu thich mau o day
+            int leftX = 70;
+            int rightX = width - 70;
+            int topY = 52;
+            int bottomY = height - 40;
 
-            g2.setColor(Color.BLACK);
-            g2.setFont(g2.getFont().deriveFont(Font.BOLD, 15f));
-            g2.drawString("CLIENT", leftX - 30, 25);
-            g2.drawString("SERVER", rightX - 32, 25);
+            // Tieu de hai dau
+            g2.setFont(g2.getFont().deriveFont(Font.BOLD, 14f));
+            g2.setColor(new Color(40, 40, 40));
+            centerText(g2, "CLIENT", leftX, 28);
+            centerText(g2, "SERVER", rightX, 28);
 
-            g2.setStroke(new BasicStroke(1.5f));
-            g2.drawLine(leftX, topY, leftX, bottomY);
-            g2.drawLine(rightX, topY, rightX, bottomY);
+            g2.setColor(new Color(190, 195, 202));
+            g2.setStroke(new BasicStroke(2f));
+            g2.drawLine(leftX, topY - 8, leftX, bottomY);
+            g2.drawLine(rightX, topY - 8, rightX, bottomY);
 
-            drawLegend(g2, height);
+            drawLegend(g2, height, width);
 
             if (events.isEmpty()) {
                 g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 13f));
-                g2.setColor(Color.GRAY);
-                g2.drawString("Dang cho du lieu...", leftX + 20, height / 2);
+                g2.setColor(GRAY);
+                centerText(g2, "Dang cho du lieu...", width / 2, height / 2);
                 return;
             }
 
-            // So mui ten ve vua khit chieu cao khung -> khong bao gio bi che
-            int slots = Math.max(1, (bottomY - topY - 30) / ROW_HEIGHT);
+            int slots = Math.max(1, (bottomY - topY) / ROW_HEIGHT);
             int start = Math.max(0, events.size() - slots);
 
-            int y = topY + 24;
+            int y = topY + 14;
             for (PacketEvent event : events.subList(start, events.size())) {
                 boolean clientToServer = event.direction.startsWith("Client");
                 int fromX = clientToServer ? leftX : rightX;
                 int toX = clientToServer ? rightX : leftX;
+                Color color = colorFor(event.status);
+                boolean lost = event.status == PacketEvent.Status.LOST;
 
-                g2.setColor(colorFor(event.status));
-                g2.setStroke(new BasicStroke(2f));
-                g2.drawLine(fromX, y, toX, y);
-                drawArrowHead(g2, fromX, toX, y);
+                // Goi bi mat: ve net dut va dung giua duong, danh dau X (khong cham toi dich)
+                int endX = lost ? fromX + (int) ((toX - fromX) * 0.58) : toX;
 
-                String label = event.packetType + " seq=" + event.seqNum
-                        + (event.ackNum != 0 ? " ack=" + event.ackNum : "");
-                g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 11f));
-                g2.drawString(label, Math.min(fromX, toX) + 10, y - 5);
+                g2.setColor(color);
+                if (lost) {
+                    g2.setStroke(new BasicStroke(2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f,
+                            new float[]{6f, 5f}, 0f));
+                    g2.drawLine(fromX, y, endX, y);
+                    g2.setStroke(new BasicStroke(2.6f));
+                    g2.drawLine(endX - 6, y - 6, endX + 6, y + 6);
+                    g2.drawLine(endX - 6, y + 6, endX + 6, y - 6);
+                } else {
+                    g2.setStroke(new BasicStroke(2f));
+                    g2.drawLine(fromX, y, endX, y);
+                    drawArrowHead(g2, fromX, endX, y);
+                }
+
+                g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 12f));
+                String label = labelFor(event);
+                int labelWidth = g2.getFontMetrics().stringWidth(label);
+                int labelX = (Math.min(fromX, endX) + Math.max(fromX, endX)) / 2 - labelWidth / 2;
+                g2.drawString(label, labelX, y - 7);
 
                 y += ROW_HEIGHT;
             }
         }
 
-        private void drawLegend(Graphics2D g2, int height) {
+        private static String labelFor(PacketEvent e) {
+            StringBuilder sb = new StringBuilder(e.packetType);
+            if (e.seqNum != 0) sb.append("  seq=").append(e.seqNum);
+            if (e.ackNum != 0) sb.append("  ack=").append(e.ackNum);
+            if (e.status == PacketEvent.Status.LOST) sb.append("  (mat)");
+            if (e.status == PacketEvent.Status.RETRANSMITTED) sb.append("  (gui lai)");
+            return sb.toString();
+        }
+
+        private void centerText(Graphics2D g2, String text, int cx, int y) {
+            g2.drawString(text, cx - g2.getFontMetrics().stringWidth(text) / 2, y);
+        }
+
+        private void drawLegend(Graphics2D g2, int height, int width) {
             String[] names = {"Da gui", "ACK", "Mat goi", "Gui lai"};
             PacketEvent.Status[] statuses = {PacketEvent.Status.SENT, PacketEvent.Status.ACKED,
                     PacketEvent.Status.LOST, PacketEvent.Status.RETRANSMITTED};
-            g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 11f));
-            int x = 12;
-            int y = height - 10;
+            g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 12f));
+            FontMetrics fm = g2.getFontMetrics();
+            int total = 0;
+            for (String n : names) total += 22 + fm.stringWidth(n) + 16;
+            int x = (width - total) / 2;
+            int y = height - 14;
             for (int i = 0; i < names.length; i++) {
                 g2.setColor(colorFor(statuses[i]));
-                g2.fillRect(x, y - 9, 12, 10);
-                g2.setColor(Color.DARK_GRAY);
-                g2.drawString(names[i], x + 16, y);
-                x += 16 + g2.getFontMetrics().stringWidth(names[i]) + 14;
+                g2.fillRoundRect(x, y - 9, 12, 12, 4, 4);
+                g2.setColor(new Color(70, 70, 70));
+                g2.drawString(names[i], x + 18, y + 1);
+                x += 22 + fm.stringWidth(names[i]) + 16;
             }
         }
 
         private void drawArrowHead(Graphics2D g2, int fromX, int toX, int y) {
             int direction = (toX > fromX) ? -1 : 1;
-            int size = 6;
+            int size = 8;
             int[] xs = {toX, toX + direction * size, toX + direction * size};
-            int[] ys = {y, y - size / 2, y + size / 2};
+            int[] ys = {y, y - size / 2 - 1, y + size / 2 + 1};
             g2.fillPolygon(xs, ys, 3);
         }
     }
@@ -513,22 +741,23 @@ public class Visualizer {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
             int w = getWidth();
             int h = getHeight();
-            int left = 48, right = 18, top = 48, bottom = 44;
+            int left = 52, right = 24, top = 56, bottom = 52;
             int pw = w - left - right;
             int ph = h - top - bottom;
 
-            g2.setColor(Color.BLACK);
-            g2.setFont(g2.getFont().deriveFont(Font.BOLD, 15f));
-            g2.drawString("BIEU DO cwnd (so segment)", left, 24);
+            g2.setColor(new Color(40, 40, 40));
+            g2.setFont(g2.getFont().deriveFont(Font.BOLD, 14f));
+            g2.drawString("Cua so tac nghen cwnd (segment)", left, 28);
 
             if (samples.size() < 2) {
                 g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 13f));
-                g2.setColor(Color.GRAY);
+                g2.setColor(GRAY);
                 g2.drawString("Chua co du lieu cwnd", left + 10, h / 2);
-                g2.drawString("(neu tat dieu khien tac nghen thi khong co bieu do)", left + 10, h / 2 + 20);
+                g2.drawString("(neu tat dieu khien tac nghen thi khong co bieu do)", left + 10, h / 2 + 22);
                 return;
             }
 
@@ -540,32 +769,43 @@ public class Visualizer {
             maxY = Math.ceil(maxY + 1);
 
             // Luoi ngang + nhan truc Y
-            g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 11f));
+            g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 12f));
             int yTicks = 5;
             for (int i = 0; i <= yTicks; i++) {
                 int y = top + ph - (ph * i) / yTicks;
-                g2.setColor(new Color(225, 225, 225));
+                g2.setColor(new Color(232, 234, 238));
+                g2.setStroke(new BasicStroke(1f));
                 g2.drawLine(left, y, left + pw, y);
-                g2.setColor(Color.DARK_GRAY);
-                g2.drawString(String.format("%.0f", maxY * i / yTicks), 12, y + 4);
+                g2.setColor(TEXT_MUTED);
+                String t = String.format("%.0f", maxY * i / yTicks);
+                g2.drawString(t, left - 10 - g2.getFontMetrics().stringWidth(t), y + 4);
             }
             // Nhan truc X (giay)
             for (int i = 0; i <= 5; i++) {
                 int x = left + (pw * i) / 5;
-                g2.setColor(Color.DARK_GRAY);
-                g2.drawString(String.format("%.1fs", maxT * i / 5 / 1000.0), x - 12, top + ph + 16);
+                g2.setColor(TEXT_MUTED);
+                String t = String.format("%.1fs", maxT * i / 5 / 1000.0);
+                g2.drawString(t, x - g2.getFontMetrics().stringWidth(t) / 2, top + ph + 20);
             }
-            g2.setColor(Color.BLACK);
+            g2.setColor(new Color(160, 165, 172));
             g2.setStroke(new BasicStroke(1.5f));
-            g2.drawLine(left, top, left, top + ph);
             g2.drawLine(left, top + ph, left + pw, top + ph);
-            g2.setColor(Color.DARK_GRAY);
-            g2.drawString("thoi gian (giay)", left + pw / 2 - 40, h - 8);
+
+            // Phan to mau nhat duoi duong cwnd
+            Path2D.Double area = new Path2D.Double();
+            area.moveTo(px(samples.get(0)[0], maxT, left, pw), top + ph);
+            for (double[] s : samples) {
+                area.lineTo(px(s[0], maxT, left, pw), py(s[1], maxY, top, ph));
+            }
+            area.lineTo(px(samples.get(samples.size() - 1)[0], maxT, left, pw), top + ph);
+            area.closePath();
+            g2.setColor(new Color(33, 102, 214, 28));
+            g2.fill(area);
 
             // ssthresh: duong bac thang net dut mau cam
-            g2.setColor(new Color(230, 140, 0));
-            g2.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f,
-                    new float[]{6f, 5f}, 0f));
+            g2.setColor(ORANGE);
+            g2.setStroke(new BasicStroke(1.8f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f,
+                    new float[]{7f, 5f}, 0f));
             for (int i = 1; i < samples.size(); i++) {
                 double[] a = samples.get(i - 1);
                 double[] b = samples.get(i);
@@ -578,8 +818,8 @@ public class Visualizer {
             }
 
             // cwnd: duong lien mau xanh duong
-            g2.setColor(new Color(30, 90, 200));
-            g2.setStroke(new BasicStroke(2.2f));
+            g2.setColor(BLUE);
+            g2.setStroke(new BasicStroke(2.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
             for (int i = 1; i < samples.size(); i++) {
                 double[] a = samples.get(i - 1);
                 double[] b = samples.get(i);
@@ -588,37 +828,39 @@ public class Visualizer {
             }
 
             // Cham do tai moi lan timeout
-            g2.setColor(new Color(200, 30, 30));
             for (double[] s : samples) {
                 if ((int) s[3] == 2) {
                     int x = px(s[0], maxT, left, pw);
                     int y = py(s[1], maxY, top, ph);
+                    g2.setColor(Color.WHITE);
+                    g2.fillOval(x - 7, y - 7, 14, 14);
+                    g2.setColor(RED);
                     g2.fillOval(x - 5, y - 5, 10, 10);
                 }
             }
 
-            drawLegend(g2, left, 38);
+            drawLegend(g2, left, h - 14);
         }
 
         private void drawLegend(Graphics2D g2, int x, int y) {
-            g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 11f));
-            g2.setStroke(new BasicStroke(2.2f));
-            g2.setColor(new Color(30, 90, 200));
-            g2.drawLine(x, y - 4, x + 18, y - 4);
-            g2.setColor(Color.DARK_GRAY);
-            g2.drawString("cwnd", x + 22, y);
-            x += 70;
-            g2.setColor(new Color(230, 140, 0));
-            g2.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f,
-                    new float[]{6f, 5f}, 0f));
-            g2.drawLine(x, y - 4, x + 18, y - 4);
-            g2.setColor(Color.DARK_GRAY);
-            g2.drawString("ssthresh", x + 22, y);
+            g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 12f));
+            g2.setColor(BLUE);
+            g2.setStroke(new BasicStroke(2.6f));
+            g2.drawLine(x, y - 4, x + 20, y - 4);
+            g2.setColor(new Color(70, 70, 70));
+            g2.drawString("cwnd", x + 26, y);
             x += 90;
-            g2.setColor(new Color(200, 30, 30));
-            g2.fillOval(x, y - 9, 10, 10);
-            g2.setColor(Color.DARK_GRAY);
-            g2.drawString("timeout (mat goi)", x + 15, y);
+            g2.setColor(ORANGE);
+            g2.setStroke(new BasicStroke(1.8f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f,
+                    new float[]{6f, 4f}, 0f));
+            g2.drawLine(x, y - 4, x + 20, y - 4);
+            g2.setColor(new Color(70, 70, 70));
+            g2.drawString("ssthresh", x + 26, y);
+            x += 110;
+            g2.setColor(RED);
+            g2.fillOval(x, y - 10, 10, 10);
+            g2.setColor(new Color(70, 70, 70));
+            g2.drawString("timeout (mat goi)", x + 16, y);
         }
 
         private static int px(double t, double maxT, int left, int pw) {
