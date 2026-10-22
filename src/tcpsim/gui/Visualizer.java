@@ -58,8 +58,8 @@ public class Visualizer {
     // ---- Cot ket qua ----
     private final JLabel resultBadge;
     private final JLabel reasonLabel;
-    private final JLabel valData, valTime, valPhases, valSpeed, valSegments, valSends, valRetrans, valLost,
-            valCwndDrops, valCwndMax;
+    private final JLabel valData, valTime, valPhases, valSpeed, valSegments, valSends, valRetrans, valFast,
+            valLost, valCwndDrops, valCwndMax;
 
     // ---- Dai trang thai song ----
     private final JLabel phaseBadge;
@@ -77,7 +77,7 @@ public class Visualizer {
     private Visualizer(SessionSettings initial, SessionRunner runner) {
         this.runner = runner;
 
-        frame = new JFrame("Mo phong giao thuc TCP");
+        frame = new JFrame("Mo phong TCP - Truc quan hoa goi tin (PBL4)");
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         frame.setSize(1260, 800);
         frame.setMinimumSize(new Dimension(1000, 640));
@@ -165,6 +165,7 @@ public class Visualizer {
         valSegments = metricRow(metrics, m++, "So segment", "valSegments");
         valSends = metricRow(metrics, m++, "Tong luot gui", "valSends");
         valRetrans = metricRow(metrics, m++, "Gui lai", "valRetrans");
+        valFast = metricRow(metrics, m++, "Fast retransmit", "valFast");
         valLost = metricRow(metrics, m++, "Mat goi gia lap", "valLost");
         valCwndDrops = metricRow(metrics, m++, "cwnd giam (timeout)", "valCwndDrops");
         valCwndMax = metricRow(metrics, m++, "cwnd lon nhat", "valCwndMax");
@@ -483,7 +484,7 @@ public class Visualizer {
         } else {
             int type = (int) lastSample[3];
             phaseBadge.setText(phaseName(type));
-            phaseBadge.setBackground(type == 0 ? BLUE : type == 1 ? GREEN : RED);
+            phaseBadge.setBackground(type == 0 ? BLUE : type == 1 ? GREEN : type == 3 ? ORANGE : RED);
             cwndLabel.setText(String.format("<html>cwnd <b>%.2f</b></html>", lastSample[1]));
             ssthreshLabel.setText(String.format("<html>ssthresh <b>%.0f</b></html>", lastSample[2]));
         }
@@ -496,7 +497,7 @@ public class Visualizer {
     // =====================================================================
     private void clearMetrics() {
         for (JLabel v : new JLabel[]{valData, valTime, valPhases, valSpeed, valSegments, valSends,
-                valRetrans, valLost, valCwndDrops, valCwndMax}) {
+                valRetrans, valFast, valLost, valCwndDrops, valCwndMax}) {
             v.setText("-");
             v.setForeground(Color.BLACK);
         }
@@ -530,16 +531,17 @@ public class Visualizer {
             double hs = r.handshakeMs / 1000.0;
             double tr = r.transferMs / 1000.0;
             valTime.setText(String.format("%.1f s", hs + tr));
-            valPhases.setText(String.format("%.1f s + %.1f s", hs, tr));
+            valPhases.setText(String.format("%.1f + %.1f s", hs, tr));
             if (r.success) {
                 valSpeed.setText(String.format("%.0f byte/s", r.payloadBytes / Math.max(tr, 0.001)));
             }
         }
 
         double retransPct = r.dataTransmissions == 0 ? 0 : 100.0 * r.retransmissions / r.dataTransmissions;
-        valSegments.setText(r.segments + "  (" + r.payloadBytes + " byte)");
+        valSegments.setText(r.segments + "  (" + r.payloadBytes + " B)");
         valSends.setText(String.valueOf(r.dataTransmissions));
         valRetrans.setText(String.format("%d  (%.0f%%)", r.retransmissions, retransPct));
+        valFast.setText(r.fastRetransmits + " lan");
         valLost.setText(String.valueOf(r.lostPackets));
         if (r.ccEnabled) {
             valCwndDrops.setText(r.cwndReductions + " lan");
@@ -558,6 +560,7 @@ public class Visualizer {
             case 0: return "SLOW START";
             case 1: return "CONGESTION AVOIDANCE";
             case 2: return "TIMEOUT - cwnd ve 1";
+            case 3: return "FAST RETRANSMIT - cwnd giam 1/2";
             default: return "?";
         }
     }
@@ -827,14 +830,15 @@ public class Visualizer {
                         px(b[0], maxT, left, pw), py(b[1], maxY, top, ph));
             }
 
-            // Cham do tai moi lan timeout
+            // Cham do tai moi lan timeout, cham cam tai moi lan fast retransmit
             for (double[] s : samples) {
-                if ((int) s[3] == 2) {
+                int type = (int) s[3];
+                if (type == 2 || type == 3) {
                     int x = px(s[0], maxT, left, pw);
                     int y = py(s[1], maxY, top, ph);
                     g2.setColor(Color.WHITE);
                     g2.fillOval(x - 7, y - 7, 14, 14);
-                    g2.setColor(RED);
+                    g2.setColor(type == 2 ? RED : ORANGE);
                     g2.fillOval(x - 5, y - 5, 10, 10);
                 }
             }
@@ -860,7 +864,12 @@ public class Visualizer {
             g2.setColor(RED);
             g2.fillOval(x, y - 10, 10, 10);
             g2.setColor(new Color(70, 70, 70));
-            g2.drawString("timeout (mat goi)", x + 16, y);
+            g2.drawString("timeout", x + 16, y);
+            x += 80;
+            g2.setColor(ORANGE);
+            g2.fillOval(x, y - 10, 10, 10);
+            g2.setColor(new Color(70, 70, 70));
+            g2.drawString("fast retransmit", x + 16, y);
         }
 
         private static int px(double t, double maxT, int left, int pw) {

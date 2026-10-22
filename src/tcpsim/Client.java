@@ -63,7 +63,7 @@ public class Client {
     // ---------------- Cau hinh cho retransmission ----------------
     static final long RTO_MS = 1000;                     // qua 1s khong co ACK -> gui lai
     static final long TIMEOUT_CHECK_INTERVAL_MS = 200;    // chu ky "thuc day" cua TimeoutThread
-    static final int MAX_DATA_RETRIES = 5;                // so lan gui lai toi da cho 1 segment
+    static final int MAX_DATA_RETRIES = 8;                // so lan gui lai toi da cho 1 segment (nang tu 5 de chiu duoc mat goi cao)
 
     static DatagramSocket clientSocket;
     static InetAddress serverAddress;
@@ -80,6 +80,13 @@ public class Client {
     // ---------------- BUOC 4 + 5: thong ke va quan ly nhieu phien ----------------
     static final AtomicInteger statFirstSends = new AtomicInteger();   // so segment du lieu gui lan dau
     static final AtomicInteger statRetransmits = new AtomicInteger();  // so luot gui lai segment du lieu
+    static final AtomicInteger statFastRetransmits = new AtomicInteger(); // so lan gui lai nhanh (3 ACK trung lap)
+    // BUOC 6 (fast retransmit): dem so ACK TRUNG LAP lien tiep. Server cu moi goi den (ke ca goi
+    // sai thu tu) deu tra ve ACK "toi dang cho seq=X" -> gap 3 ACK cung X nghia la goi X da mat
+    // nhung cac goi sau no van den noi. Khong can cho het RTO 1 giay, gui lai X ngay.
+    static final int DUP_ACK_THRESHOLD = 3;
+    static int lastAckNum = 0;
+    static int dupAckCount = 0;
     static volatile String serverReport = null;  // "len=..;crc=.." Server gui kem trong ACK cua FIN
     // Moi phien co 1 so rieng. Cac thread nen thay so nay doi (phien da ket thuc / phien moi bat dau)
     // thi tu thoat, nen chay lai nhieu lan khong bi nhan doi thread.
@@ -188,6 +195,20 @@ public class Client {
         }
 
         // type: 0 = slow start, 1 = congestion avoidance, 2 = timeout. Dong thoi bao cho GUI ve bieu do.
+        /**
+         * BUOC 6: 3 ACK trung lap -> mat 1 goi nhung mang van thong (cac goi sau van den).
+         * Phat nhe hon timeout: ssthresh = cwnd/2 va cwnd = ssthresh (KHONG ve 1).
+         */
+        synchronized void onFastRetransmit(long now) {
+            if (!enabled) return;
+            ssthresh = Math.max(cwnd / 2, 2);
+            cwnd = ssthresh;
+            lastReductionTime = now; // timeout ngay sau do (cung 1 dot mat goi) khong giam them lan nua
+            record(3);
+            log(String.format("[CC] 3 ACK trung lap -> FAST RETRANSMIT: ssthresh=%.0f, cwnd=%.0f (khong ve 1)",
+                    ssthresh, cwnd));
+        }
+
         private void record(int type) {
             double t = System.currentTimeMillis() - startTime;
             history.add(new double[]{t, cwnd, ssthresh});
@@ -276,6 +297,7 @@ public class Client {
             }
             report.segments = statFirstSends.get();
             report.retransmissions = statRetransmits.get();
+            report.fastRetransmits = statFastRetransmits.get();
             report.dataTransmissions = report.segments + report.retransmissions;
             report.lostPackets = NetworkSimulator.lostCount.get();
             report.cwndReductions = congestion.reductions;
@@ -293,6 +315,7 @@ public class Client {
         serverReport = null;
         statFirstSends.set(0);
         statRetransmits.set(0);
+        statFastRetransmits.set(0);
 
         windowSize = Math.max(1, s.windowSize);
         congestion = new CongestionControl(s.congestionControl, s.ssthresh);
@@ -354,6 +377,8 @@ public class Client {
 
         // Tu day, KHONG dung socket timeout nua - ReceiverThread se tu chan cho goi tin den.
         clientSocket.setSoTimeout(0);
+        lastAckNum = currentSeq; // ACK dau tien cua du lieu se > gia tri nay
+        dupAckCount = 0;
 
         // ================= KHOI DONG 2 THREAD NEN =================
         Thread receiverThread = new Thread(() -> receiverLoop(gen), "ReceiverThread");
@@ -527,6 +552,20 @@ public class Client {
                         congestion.onAcked(ackedData, windowSize);
                     }
                     log("Nhan ACK, server dang cho seq=" + ackNum);
+
+                    // ---- BUOC 6: phat hien ACK trung lap ----
+                    // (bo qua SYN-ACK cua bat tay: chi xet ACK cua giai doan truyen du lieu)
+                    if (!Packet.hasFlag(response.flags, Packet.FLAG_SYN)) {
+                        if (ackNum > lastAckNum) {
+                            lastAckNum = ackNum; // ACK moi, tien len -> het chuoi trung lap
+                            dupAckCount = 0;
+                        } else if (ackNum == lastAckNum) {
+                            dupAckCount++;
+                            if (dupAckCount == DUP_ACK_THRESHOLD) { // dung 1 lan cho moi dot mat goi
+                                fastRetransmit(ackNum);
+                            }
+                        }
+                    }
                     EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Server -> Client",
                             "ACK", response.seqNum, ackNum, ""));
                 }
@@ -548,36 +587,67 @@ public class Client {
 
             long now = System.currentTimeMillis();
             synchronized (unackedSegments) {
-                for (Map.Entry<Integer, SegmentInfo> entry : unackedSegments.entrySet()) {
-                    int seq = entry.getKey();
-                    SegmentInfo info = entry.getValue();
-
+                // BUOC 6: chi xet goi CU NHAT chua duoc ACK (seq nho nhat), giong TCP chi giu 1 dong ho.
+                // Truoc day moi goi co dong ho rieng: mat 1 goi la ca loat goi dung sau no cung "qua han"
+                // va bi gui lai thua, du Server da nhan duoc chung. Gui lai goi cu nhat xong, ACK se
+                // nhay vot qua cac goi Server da giu san, nen cac goi con lai tu het cho ACK.
+                Integer seq = oldestUnackedSeq();
+                if (seq != null) {
+                    SegmentInfo info = unackedSegments.get(seq);
                     if (now - info.sentTime >= RTO_MS) {
-                        congestion.onTimeout(now); // giam cwnd (tu gioi han: chi 1 lan moi dot mat goi)
+                        congestion.onTimeout(now); // giam cwnd ve 1 (tu gioi han: chi 1 lan moi dot mat goi)
                         if (info.retryCount >= MAX_DATA_RETRIES) {
                             log("LOI: seq=" + seq + " qua " + MAX_DATA_RETRIES
                                     + " lan gui lai van khong duoc ACK. Huy phien truyen.");
                             transferFailed = true;
-                            break;
-                        }
-                        try {
-                            Packet resend = new Packet(seq, 0, info.flags, info.payload);
-                            // Goi truc tiep NetworkSimulator.send (khong qua sendRaw) de
-                            // bao dung trang thai RETRANSMITTED thay vi SENT cho GUI.
-                            NetworkSimulator.send(clientSocket, resend, serverAddress, SERVER_PORT,
-                                    "Client -> Server", PacketEvent.Status.RETRANSMITTED);
-                            info.retryCount++;
-                            if (info.payload.length > 0) statRetransmits.incrementAndGet();
-                            info.sentTime = now;
-                            log("Qua RTO (" + RTO_MS + "ms) chua co ACK -> GUI LAI seq=" + seq
-                                    + " (lan thu " + (info.retryCount + 1) + ")");
-                        } catch (Exception e) {
-                            log("Loi khi gui lai seq=" + seq + ": " + e.getMessage());
+                        } else {
+                            retransmit(seq, info, now, "Qua RTO (" + RTO_MS + "ms) chua co ACK -> GUI LAI seq=" + seq);
                         }
                     }
                 }
             }
         }
+    }
+
+    /** Seq nho nhat trong bang "da gui chua ACK" (goi cu nhat). Phai goi khi dang giu khoa unackedSegments. */
+    static Integer oldestUnackedSeq() {
+        Integer min = null;
+        for (Integer k : unackedSegments.keySet()) {
+            if (min == null || k < min) min = k;
+        }
+        return min;
+    }
+
+    /** Gui lai 1 segment (dung chung cho timeout va fast retransmit). Phai giu khoa unackedSegments. */
+    static void retransmit(int seq, SegmentInfo info, long now, String reason) {
+        try {
+            Packet resend = new Packet(seq, 0, info.flags, info.payload);
+            // Goi truc tiep NetworkSimulator.send (khong qua sendRaw) de
+            // bao dung trang thai RETRANSMITTED thay vi SENT cho GUI.
+            NetworkSimulator.send(clientSocket, resend, serverAddress, SERVER_PORT,
+                    "Client -> Server", PacketEvent.Status.RETRANSMITTED);
+            info.retryCount++;
+            if (info.payload.length > 0) statRetransmits.incrementAndGet();
+            info.sentTime = now;
+            log(reason + " (lan thu " + (info.retryCount + 1) + ")");
+        } catch (Exception e) {
+            log("Loi khi gui lai seq=" + seq + ": " + e.getMessage());
+        }
+    }
+
+    /** BUOC 6: gui lai NGAY goi Server dang cho (seq = ackNum) khi nhan du 3 ACK trung lap. */
+    static void fastRetransmit(int missingSeq) {
+        long now = System.currentTimeMillis();
+        synchronized (unackedSegments) {
+            SegmentInfo info = unackedSegments.get(missingSeq);
+            if (info == null || info.retryCount >= MAX_DATA_RETRIES) {
+                return; // goi do da duoc ACK roi, hoac da gui lai qua nhieu - de timeout xu ly
+            }
+            statFastRetransmits.incrementAndGet();
+            retransmit(missingSeq, info, now,
+                    "3 ACK trung lap (Server van cho seq=" + missingSeq + ") -> GUI LAI NGAY seq=" + missingSeq);
+        }
+        congestion.onFastRetransmit(now);
     }
 
     /** Dung cho LAN GUI DAU cua moi goi tin (SYN, ACK, segment, FIN) - bao GUI la SENT. */

@@ -17,6 +17,7 @@ public class SessionReport {
     public int segments = 0;             // so segment du lieu (khong tinh gui lai)
     public int dataTransmissions = 0;    // tong so luot gui segment du lieu (ke ca gui lai)
     public int retransmissions = 0;      // so luot gui lai
+    public int fastRetransmits = 0;      // so lan gui lai nhanh do 3 ACK trung lap
     public int lostPackets = 0;          // so goi bi mat do mo phong tren Client
     public int cwndReductions = 0;       // so lan cwnd bi giam do timeout
     public double maxCwnd = 0;           // cwnd lon nhat dat duoc
