@@ -35,6 +35,7 @@ echo Dang doc cau hinh tu client-config.txt:
 type client-config.txt
 echo.
 echo Dang khoi dong CLIENT va mo cua so truc quan hoa...
+echo Co the mo nhieu cua so run_client.bat cung ket noi toi mot Server.
 echo.
 
 java -cp bin tcpsim.Client

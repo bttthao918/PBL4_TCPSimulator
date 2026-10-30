@@ -17,6 +17,8 @@ ipconfig | findstr /R /C:"IPv4"
 echo ================================================================
 echo.
 echo Dang khoi dong SERVER tren cong 5005 ...
+echo Server ho tro nhieu CLIENT ket noi dong thoi.
+echo Tren moi may CLIENT: dien IP Server vao client-config.txt roi chay run_client.bat.
 echo (Dong cua so nay hoac nhan Ctrl+C de dung server)
 echo.
 
