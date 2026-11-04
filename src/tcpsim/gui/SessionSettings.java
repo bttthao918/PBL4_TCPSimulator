@@ -7,7 +7,8 @@ package tcpsim.gui;
  * client-config.txt, sau do nguoi dung co the sua ngay tren GUI roi bam "Chay lai".
  */
 public class SessionSettings {
-    public String serverIp = "127.0.0.1";
+    /** "auto" lets Client discover the server on the local LAN. */
+    public String serverIp = "auto";
     public int lossPercent = 0;          // ti le mat goi gia lap cua Client (%)
     public int delayMinMs = 0;           // do tre toi thieu moi goi (ms)
     public int delayMaxMs = 0;           // do tre toi da moi goi (ms)

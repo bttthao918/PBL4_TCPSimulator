@@ -48,6 +48,9 @@ import tcpsim.gui.Visualizer;
 public class Client {
 
     static final int SERVER_PORT = 5005;
+    static final String AUTO_SERVER = "auto";
+    static final byte[] DISCOVERY_REQUEST = "PBL4_DISCOVER_V1".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] DISCOVERY_RESPONSE = "PBL4_SERVER_V1".getBytes(StandardCharsets.US_ASCII);
     static final int HANDSHAKE_TIMEOUT_MS = 2000;
     static final int MAX_HANDSHAKE_RETRIES = 5;
 
@@ -245,7 +248,7 @@ public class Client {
         // bam "Chay lai", khong can sua file nua.
         Map<String, String> config = loadConfig("client-config.txt");
         SessionSettings initial = new SessionSettings();
-        initial.serverIp = config.getOrDefault("server_ip", "127.0.0.1");
+        initial.serverIp = config.getOrDefault("server_ip", AUTO_SERVER);
         initial.lossPercent = (int) Math.round(Double.parseDouble(config.getOrDefault("loss_percent", "0")));
         initial.delayMinMs = Integer.parseInt(config.getOrDefault("delay_min_ms", "0"));
         initial.delayMaxMs = Integer.parseInt(config.getOrDefault("delay_max_ms", "0"));
@@ -333,7 +336,7 @@ public class Client {
 
         long sessionStart = System.currentTimeMillis();
         clientSocket = new DatagramSocket();
-        serverAddress = InetAddress.getByName(s.serverIp);
+        serverAddress = resolveServerAddress(s.serverIp);
 
         int clientIsn = random.nextInt(1000, 9999);
         log("Client san sang, ISN = " + clientIsn);
@@ -458,6 +461,51 @@ public class Client {
             return;
         }
         report.success = true;
+    }
+
+    /**
+     * Resolve server IP. "auto" broadcasts a small discovery packet on the LAN,
+     * so a client does not depend on a stale DHCP address in client-config.txt.
+     */
+    static InetAddress resolveServerAddress(String configuredAddress) throws IOException {
+        String value = configuredAddress == null ? AUTO_SERVER : configuredAddress.trim();
+        if (!value.equalsIgnoreCase(AUTO_SERVER)) {
+            InetAddress address = InetAddress.getByName(value);
+            log("Dung dia chi Server cau hinh: " + address.getHostAddress());
+            return address;
+        }
+
+        byte[] buffer = new byte[DISCOVERY_RESPONSE.length];
+        DatagramPacket request = new DatagramPacket(
+                DISCOVERY_REQUEST, DISCOVERY_REQUEST.length,
+                InetAddress.getByName("255.255.255.255"), SERVER_PORT);
+        clientSocket.setBroadcast(true);
+        clientSocket.setSoTimeout(800);
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            clientSocket.send(request);
+            log("Dang tim Server trong LAN (lan " + attempt + ")...");
+            try {
+                DatagramPacket response = new DatagramPacket(buffer, buffer.length);
+                clientSocket.receive(response);
+                if (response.getLength() == DISCOVERY_RESPONSE.length) {
+                    boolean valid = true;
+                    for (int i = 0; i < DISCOVERY_RESPONSE.length; i++) {
+                        if (response.getData()[response.getOffset() + i] != DISCOVERY_RESPONSE[i]) {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if (valid) {
+                        log("Tim thay Server tai " + response.getAddress().getHostAddress() + ":" + SERVER_PORT);
+                        return response.getAddress();
+                    }
+                }
+            } catch (SocketTimeoutException ignored) {
+                // Try the next discovery broadcast.
+            }
+        }
+        throw new IOException("Khong tim thay Server trong LAN. Hay kiem tra server dang chay va Firewall UDP "
+                + SERVER_PORT + ".");
     }
 
     /** Gui 1 segment (hoac FIN) va dang ky vao unackedSegments de 2 thread kia theo doi. */

@@ -1,12 +1,12 @@
-# File cau hinh Client - CHI CAN SUA DONG server_ip BEN DUOI
-# Dien dia chi IPv4 cua may dang chay Server (xem o cua so run_server.bat)
-server_ip=127.0.0.1
+# File cau hinh Client
+# "auto" tu tim Server trong cung LAN; hoac dien IPv4 cua may Server neu can.
+server_ip=auto
 
 # Mo phong mang (tuy chon) - de 0 neu muon demo qua mang LAN that,
 # khong can gia lap gi them vi mang that da co do tre/rui ro tu nhien.
 window_size=32
 congestion_control=on
 ssthresh=16
-loss_percent=10
+loss_percent=0
 delay_min_ms=100
 delay_max_ms=100

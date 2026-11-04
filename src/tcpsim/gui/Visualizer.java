@@ -371,7 +371,7 @@ public class Visualizer {
 
     private SessionSettings readSettings() {
         SessionSettings s = new SessionSettings();
-        s.serverIp = ipField.getText().trim().isEmpty() ? "127.0.0.1" : ipField.getText().trim();
+        s.serverIp = ipField.getText().trim().isEmpty() ? "auto" : ipField.getText().trim();
         s.lossPercent = intValue(lossSpinner);
         s.delayMinMs = intValue(delayMinSpinner);
         s.delayMaxMs = intValue(delayMaxSpinner);

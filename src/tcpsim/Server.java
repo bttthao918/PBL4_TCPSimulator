@@ -6,6 +6,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +28,8 @@ import tcpsim.gui.PacketEvent;
 public class Server {
 
     static final int PORT = 5005;
+    static final byte[] DISCOVERY_REQUEST = "PBL4_DISCOVER_V1".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] DISCOVERY_RESPONSE = "PBL4_SERVER_V1".getBytes(StandardCharsets.US_ASCII);
     static final int BUFFER_SIZE = 2048;
     static final int SESSION_CLEANUP_INTERVAL_MS = 1000;
     static final long SESSION_IDLE_TIMEOUT_NS = TimeUnit.MINUTES.toNanos(2);
@@ -104,6 +107,9 @@ public class Server {
 
         try (DatagramSocket serverSocket = new DatagramSocket(PORT)) {
             serve(serverSocket);
+        } catch (BindException e) {
+            log("LOI: Cong UDP " + PORT + " dang duoc su dung. Server co the dang chay o cua so khac.");
+            log("Hay dung server cu truoc khi khoi dong lai, hoac tiep tuc dung server cu.");
         }
     }
 
@@ -134,6 +140,14 @@ public class Server {
                 continue;
             }
             InetSocketAddress clientAddress = (InetSocketAddress) datagram.getSocketAddress();
+            if (isDiscoveryRequest(datagram)) {
+                DatagramPacket response = new DatagramPacket(
+                        DISCOVERY_RESPONSE, DISCOVERY_RESPONSE.length,
+                        clientAddress.getAddress(), clientAddress.getPort());
+                serverSocket.send(response);
+                log("Phan hoi discovery cho " + clientAddress);
+                continue;
+            }
             if (datagram.getLength() < Packet.HEADER_SIZE) {
                 log("[Client " + clientAddress + "] Bo qua goi tin thieu header.");
                 continue;
@@ -160,6 +174,14 @@ public class Server {
             session.lastActivityNs = System.nanoTime();
             handlePacket(serverSocket, session, packet);
         }
+    }
+
+    private static boolean isDiscoveryRequest(DatagramPacket datagram) {
+        if (datagram.getLength() != DISCOVERY_REQUEST.length) return false;
+        for (int i = 0; i < DISCOVERY_REQUEST.length; i++) {
+            if (datagram.getData()[datagram.getOffset() + i] != DISCOVERY_REQUEST[i]) return false;
+        }
+        return true;
     }
 
     private static void handlePacket(DatagramSocket socket, ClientSession session, Packet packet) {
