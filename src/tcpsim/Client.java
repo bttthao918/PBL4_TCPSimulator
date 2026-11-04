@@ -64,7 +64,6 @@ public class Client {
     static int windowSize = 4;
 
     // ---------------- Cau hinh cho retransmission ----------------
-    static final long RTO_MS = 1000;                     // qua 1s khong co ACK -> gui lai
     static final long TIMEOUT_CHECK_INTERVAL_MS = 200;    // chu ky "thuc day" cua TimeoutThread
     static final int MAX_DATA_RETRIES = 8;                // so lan gui lai toi da cho 1 segment (nang tu 5 de chiu duoc mat goi cao)
 
@@ -86,7 +85,7 @@ public class Client {
     static final AtomicInteger statFastRetransmits = new AtomicInteger(); // so lan gui lai nhanh (3 ACK trung lap)
     // BUOC 6 (fast retransmit): dem so ACK TRUNG LAP lien tiep. Server cu moi goi den (ke ca goi
     // sai thu tu) deu tra ve ACK "toi dang cho seq=X" -> gap 3 ACK cung X nghia la goi X da mat
-    // nhung cac goi sau no van den noi. Khong can cho het RTO 1 giay, gui lai X ngay.
+    // nhung cac goi sau no van den noi. Khong can cho het RTO hien tai, gui lai X ngay.
     static final int DUP_ACK_THRESHOLD = 3;
     static int lastAckNum = 0;
     static int dupAckCount = 0;
@@ -94,6 +93,7 @@ public class Client {
     // Moi phien co 1 so rieng. Cac thread nen thay so nay doi (phien da ket thuc / phien moi bat dau)
     // thi tu thoat, nen chay lai nhieu lan khong bi nhan doi thread.
     static volatile int sessionGen = 0;
+    static final RtoEstimator rtoEstimator = new RtoEstimator();
 
     static final Random random = new Random();
     static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
@@ -188,7 +188,7 @@ public class Client {
         /** TimeoutThread goi khi co segment qua han RTO. Chi giam 1 lan cho moi dot mat goi. */
         synchronized void onTimeout(long now) {
             if (!enabled) return;
-            if (lastReductionTime != 0 && now - lastReductionTime < RTO_MS) return;
+            if (lastReductionTime != 0 && now - lastReductionTime < rtoEstimator.getRtoMs()) return;
             ssthresh = Math.max(cwnd / 2, 2);
             cwnd = 1;
             lastReductionTime = now;
@@ -230,12 +230,16 @@ public class Client {
         byte[] payload;
         byte flags;
         long sentTime;
+        long firstSentTime;
+        boolean retransmitted;
         int retryCount;
 
         SegmentInfo(byte[] payload, byte flags, long sentTime) {
             this.payload = payload;
             this.flags = flags;
             this.sentTime = sentTime;
+            this.firstSentTime = sentTime;
+            this.retransmitted = false;
             this.retryCount = 0;
         }
     }
@@ -313,6 +317,8 @@ public class Client {
             report.corruptedPackets = NetworkSimulator.corruptedCount.get();
             report.cwndReductions = congestion.reductions;
             report.maxCwnd = congestion.maxCwnd;
+            report.finalSrttMs = rtoEstimator.getSrttMs();
+            report.finalRtoMs = rtoEstimator.getRtoMs();
             EventBus.publishReport(report);
         }
     }
@@ -343,6 +349,7 @@ public class Client {
         log("Dia chi Server se ket noi toi: " + s.serverIp + ":" + SERVER_PORT);
 
         long sessionStart = System.currentTimeMillis();
+        rtoEstimator.reset(sessionStart);
         clientSocket = new DatagramSocket();
         serverAddress = resolveServerAddress(s.serverIp);
 
@@ -592,6 +599,7 @@ public class Client {
                         serverReport = new String(response.payload, StandardCharsets.UTF_8);
                     }
                     int ackedData = 0; // so segment DU LIEU vua duoc ACK (de tang cwnd)
+                    List<SegmentInfo> ackedSegments = new ArrayList<>();
                     synchronized (unackedSegments) {
                         // Cumulative ACK: server bao "toi da nhan dung toi byte X",
                         // nen xoa MOI segment co seq < X (khong chi segment vua gui).
@@ -599,10 +607,21 @@ public class Client {
                         while (it.hasNext()) {
                             Map.Entry<Integer, SegmentInfo> acked = it.next();
                             if (acked.getKey() < ackNum) {
-                                if (acked.getValue().payload.length > 0) ackedData++;
+                                SegmentInfo info = acked.getValue();
+                                ackedSegments.add(info);
+                                if (info.payload.length > 0) ackedData++;
                                 it.remove();
                             }
                         }
+                    }
+                    if (ackedSegments.size() == 1 && !ackedSegments.get(0).retransmitted) {
+                        long sampleMs = System.currentTimeMillis() - ackedSegments.get(0).firstSentTime;
+                        rtoEstimator.onRttSample(sampleMs);
+                        log("RTT mau = " + sampleMs + " ms");
+                    } else if (ackedSegments.size() > 1) {
+                        log("Bo mau RTT: ACK tich luy (xoa " + ackedSegments.size() + " segment)");
+                    } else if (ackedSegments.size() == 1) {
+                        log("Bo mau RTT: goi da gui lai");
                     }
                     if (ackedData > 0) {
                         congestion.onAcked(ackedData, windowSize);
@@ -650,14 +669,16 @@ public class Client {
                 Integer seq = oldestUnackedSeq();
                 if (seq != null) {
                     SegmentInfo info = unackedSegments.get(seq);
-                    if (now - info.sentTime >= RTO_MS) {
+                    long currentRto = rtoEstimator.getRtoMs();
+                    if (now - info.sentTime >= currentRto) {
+                        rtoEstimator.onTimeout();
                         congestion.onTimeout(now); // giam cwnd ve 1 (tu gioi han: chi 1 lan moi dot mat goi)
                         if (info.retryCount >= MAX_DATA_RETRIES) {
                             log("LOI: seq=" + seq + " qua " + MAX_DATA_RETRIES
                                     + " lan gui lai van khong duoc ACK. Huy phien truyen.");
                             transferFailed = true;
                         } else {
-                            retransmit(seq, info, now, "Qua RTO (" + RTO_MS + "ms) chua co ACK -> GUI LAI seq=" + seq);
+                            retransmit(seq, info, now, "Qua RTO (" + currentRto + "ms) chua co ACK -> GUI LAI seq=" + seq);
                         }
                     }
                 }
@@ -683,6 +704,7 @@ public class Client {
             NetworkSimulator.send(clientSocket, resend, serverAddress, SERVER_PORT,
                     "Client -> Server", PacketEvent.Status.RETRANSMITTED);
             info.retryCount++;
+            info.retransmitted = true;
             if (info.payload.length > 0) statRetransmits.incrementAndGet();
             info.sentTime = now;
             log(reason + " (lan thu " + (info.retryCount + 1) + ")");

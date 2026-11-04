@@ -6,6 +6,10 @@ import java.net.InetAddress;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Random;
+import java.util.concurrent.DelayQueue;
+import java.util.concurrent.Delayed;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import tcpsim.gui.EventBus;
 import tcpsim.gui.PacketEvent;
@@ -33,6 +37,55 @@ public class NetworkSimulator {
 
     static final Random random = new Random();
     static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private static final DelayQueue<DelayedPacket> delayedPackets = new DelayQueue<>();
+    private static final AtomicLong sendOrder = new AtomicLong();
+
+    static {
+        Thread dispatcher = new Thread(() -> {
+            while (true) {
+                try {
+                    DelayedPacket delayed = delayedPackets.take();
+                    sendNow(delayed.socket, delayed.bytes, delayed.address, delayed.port);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }, "NetworkDelayDispatcher");
+        dispatcher.setDaemon(true);
+        dispatcher.start();
+    }
+
+    private static final class DelayedPacket implements Delayed {
+        final DatagramSocket socket;
+        final byte[] bytes;
+        final InetAddress address;
+        final int port;
+        final long deadlineNanos;
+        final long order;
+
+        DelayedPacket(DatagramSocket socket, byte[] bytes, InetAddress address, int port,
+                      long deadlineNanos, long order) {
+            this.socket = socket;
+            this.bytes = bytes;
+            this.address = address;
+            this.port = port;
+            this.deadlineNanos = deadlineNanos;
+            this.order = order;
+        }
+
+        @Override
+        public long getDelay(TimeUnit unit) {
+            return unit.convert(deadlineNanos - System.nanoTime(), TimeUnit.NANOSECONDS);
+        }
+
+        @Override
+        public int compareTo(Delayed other) {
+            DelayedPacket that = (DelayedPacket) other;
+            int byDeadline = Long.compare(deadlineNanos, that.deadlineNanos);
+            return byDeadline != 0 ? byDeadline : Long.compare(order, that.order);
+        }
+    }
 
     public static void configure(double lossRate, double corruptRate, int minDelay, int maxDelay) {
         packetLossRate = lossRate;
@@ -69,7 +122,8 @@ public class NetworkSimulator {
                     + " -> goi tin bi mat tren duong truyen (mo phong).");
             EventBus.publish(new PacketEvent(
                 PacketEvent.Status.LOST, direction, packet.flagsToString(),
-                packet.seqNum, packet.ackNum, "Mo phong mang - " + note
+                packet.seqNum, packet.ackNum, "Mo phong mang - " + note,
+                statusIfSent == PacketEvent.Status.RETRANSMITTED
             ));
             return false;
         }
@@ -96,23 +150,17 @@ public class NetworkSimulator {
         // dang "tren duong" (dang tre) thi vi tri ve tren so do van hop ly.
         PacketEvent.Status eventStatus = corrupted ? PacketEvent.Status.CORRUPTED : statusIfSent;
         EventBus.publish(new PacketEvent(eventStatus, direction, packet.flagsToString(),
-                packet.seqNum, packet.ackNum, note));
+                packet.seqNum, packet.ackNum, note,
+                statusIfSent == PacketEvent.Status.RETRANSMITTED));
 
         if (delay == 0) {
             sendNow(socket, bytes, address, port);
         } else {
             log("[DELAYED] seq=" + packet.seqNum + " " + packet.flagsToString()
                     + " -> se den sau " + delay + "ms.");
-            final int finalDelay = delay;
-            Thread delayThread = new Thread(() -> {
-                try {
-                    Thread.sleep(finalDelay);
-                    sendNow(socket, bytes, address, port);
-                } catch (InterruptedException ignored) {
-                }
-            }, "NetworkDelayThread");
-            delayThread.setDaemon(true);
-            delayThread.start();
+            long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delay);
+            delayedPackets.offer(new DelayedPacket(socket, bytes, address, port,
+                    deadlineNanos, sendOrder.getAndIncrement()));
         }
         return true;
     }

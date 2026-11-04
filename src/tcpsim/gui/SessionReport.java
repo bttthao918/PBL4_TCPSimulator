@@ -23,6 +23,8 @@ public class SessionReport {
     public int cwndReductions = 0;       // so lan cwnd bi giam do timeout
     public double maxCwnd = 0;           // cwnd lon nhat dat duoc
     public boolean ccEnabled = true;     // dieu khien tac nghen co bat khong
+    public double finalSrttMs = 0;
+    public double finalRtoMs = 1000;
 
     public long handshakeMs = 0;         // thoi gian bat tay
     public long transferMs = 0;          // thoi gian truyen du lieu (tu sau bat tay den khi FIN duoc ACK)

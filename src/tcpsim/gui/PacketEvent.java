@@ -27,9 +27,15 @@ public class PacketEvent {
     public final int seqNum;
     public final int ackNum;
     public final String note;        // ghi chu them, vi du noi dung payload
+    public final boolean retransmissionAttempt;
 
     public PacketEvent(Status status, String direction, String packetType,
                         int seqNum, int ackNum, String note) {
+        this(status, direction, packetType, seqNum, ackNum, note, status == Status.RETRANSMITTED);
+    }
+
+    public PacketEvent(Status status, String direction, String packetType,
+                        int seqNum, int ackNum, String note, boolean retransmissionAttempt) {
         this.time = LocalTime.now();
         this.status = status;
         this.direction = direction;
@@ -37,5 +43,6 @@ public class PacketEvent {
         this.seqNum = seqNum;
         this.ackNum = ackNum;
         this.note = note;
+        this.retransmissionAttempt = retransmissionAttempt;
     }
 }

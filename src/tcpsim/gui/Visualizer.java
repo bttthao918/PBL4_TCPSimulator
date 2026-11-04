@@ -61,7 +61,7 @@ public class Visualizer {
     private final JLabel resultBadge;
     private final JLabel reasonLabel;
     private final JLabel valData, valTime, valPhases, valSpeed, valSegments, valSends, valRetrans, valFast,
-            valLost, valCorrupt, valCwndDrops, valCwndMax;
+            valLost, valCorrupt, valCwndDrops, valCwndMax, valRto;
 
     // ---- Dai trang thai song ----
     private final JLabel phaseBadge;
@@ -175,6 +175,7 @@ public class Visualizer {
         valCorrupt = metricRow(metrics, m++, "Goi bi hong", "valCorrupt");
         valCwndDrops = metricRow(metrics, m++, "cwnd giam (timeout)", "valCwndDrops");
         valCwndMax = metricRow(metrics, m++, "cwnd lon nhat", "valCwndMax");
+        valRto = metricRow(metrics, m++, "RTO cuoi / SRTT", "valRto");
         metrics.setBorder(new EmptyBorder(8, 0, 0, 0));
         left(metrics);
         side.add(metrics);
@@ -449,6 +450,7 @@ public class Visualizer {
     private void refresh() {
         List<PacketEvent> newEvents = EventBus.drainAll();
         List<double[]> newSamples = EventBus.drainCwnd();
+        List<double[]> newRtoSamples = EventBus.drainRto();
         boolean followDiagram = diagramIsAtBottom();
 
         for (PacketEvent event : newEvents) {
@@ -468,7 +470,8 @@ public class Visualizer {
             chartPanel.addSample(sample);
             lastSample = sample;
         }
-        if (!newEvents.isEmpty() || !newSamples.isEmpty()) {
+        for (double[] sample : newRtoSamples) chartPanel.addRtoSample(sample);
+        if (!newEvents.isEmpty() || !newSamples.isEmpty() || !newRtoSamples.isEmpty()) {
             updateStatusBar();
             diagramPanel.revalidate();
             diagramPanel.repaint();
@@ -486,12 +489,18 @@ public class Visualizer {
     }
 
     private void countEvent(PacketEvent event) {
+        // Dem cung mot y nghia voi SessionReport: chi dem cac segment DATA
+        // do Client gui lai, ke ca lan gui lai do tiep tuc bi mat/hong.
+        if (event.retransmissionAttempt
+                && event.direction.startsWith("Client")
+                && "DATA".equals(event.packetType)) {
+            retransCount++;
+        }
         switch (event.status) {
             case SENT:
                 if (event.direction.startsWith("Client")) sentCount++;
                 break;
             case RETRANSMITTED:
-                retransCount++;
                 break;
             case LOST:
                 lostCount++;
@@ -530,7 +539,7 @@ public class Visualizer {
     // =====================================================================
     private void clearMetrics() {
         for (JLabel v : new JLabel[]{valData, valTime, valPhases, valSpeed, valSegments, valSends,
-                valRetrans, valFast, valLost, valCorrupt, valCwndDrops, valCwndMax}) {
+                valRetrans, valFast, valLost, valCorrupt, valCwndDrops, valCwndMax, valRto}) {
             v.setText("-");
             v.setForeground(Color.BLACK);
         }
@@ -577,6 +586,7 @@ public class Visualizer {
         valFast.setText(r.fastRetransmits + " lan");
         valLost.setText(String.valueOf(r.lostPackets));
         valCorrupt.setText(String.valueOf(r.corruptedPackets));
+        valRto.setText(String.format("%.0f / %.0f ms", r.finalRtoMs, r.finalSrttMs));
         if (r.ccEnabled) {
             valCwndDrops.setText(r.cwndReductions + " lan");
             valCwndMax.setText(String.format("%.1f", r.maxCwnd));
@@ -764,6 +774,7 @@ public class Visualizer {
     // =====================================================================
     private static class ChartPanel extends JPanel {
         private final List<double[]> samples = new ArrayList<>();
+        private final List<double[]> rtoSamples = new ArrayList<>();
 
         ChartPanel() {
             setBackground(Color.WHITE);
@@ -773,8 +784,13 @@ public class Visualizer {
             samples.add(sample);
         }
 
+        void addRtoSample(double[] sample) {
+            rtoSamples.add(sample);
+        }
+
         void clear() {
             samples.clear();
+            rtoSamples.clear();
         }
 
         @Override
@@ -792,9 +808,9 @@ public class Visualizer {
 
             g2.setColor(new Color(40, 40, 40));
             g2.setFont(g2.getFont().deriveFont(Font.BOLD, 14f));
-            g2.drawString("Cua so tac nghen cwnd (segment)", left, 28);
+            g2.drawString("cwnd va RTO (RTO/SRTT quy doi 100 ms)", left, 28);
 
-            if (samples.size() < 2) {
+            if (samples.size() < 2 && rtoSamples.size() < 2) {
                 g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 13f));
                 g2.setColor(GRAY);
                 g2.drawString("Chua co du lieu cwnd", left + 10, h / 2);
@@ -802,10 +818,15 @@ public class Visualizer {
                 return;
             }
 
-            double maxT = Math.max(samples.get(samples.size() - 1)[0], 1);
+            double maxT = 1;
+            if (!samples.isEmpty()) maxT = Math.max(maxT, samples.get(samples.size() - 1)[0]);
+            if (!rtoSamples.isEmpty()) maxT = Math.max(maxT, rtoSamples.get(rtoSamples.size() - 1)[0]);
             double maxY = 4;
             for (double[] s : samples) {
                 maxY = Math.max(maxY, Math.max(s[1], s[2]));
+            }
+            for (double[] s : rtoSamples) {
+                maxY = Math.max(maxY, Math.max(s[1], s[2]) / 100.0);
             }
             maxY = Math.ceil(maxY + 1);
 
@@ -833,15 +854,15 @@ public class Visualizer {
             g2.drawLine(left, top + ph, left + pw, top + ph);
 
             // Phan to mau nhat duoi duong cwnd
-            Path2D.Double area = new Path2D.Double();
-            area.moveTo(px(samples.get(0)[0], maxT, left, pw), top + ph);
-            for (double[] s : samples) {
-                area.lineTo(px(s[0], maxT, left, pw), py(s[1], maxY, top, ph));
+            if (!samples.isEmpty()) {
+                Path2D.Double area = new Path2D.Double();
+                area.moveTo(px(samples.get(0)[0], maxT, left, pw), top + ph);
+                for (double[] s : samples) area.lineTo(px(s[0], maxT, left, pw), py(s[1], maxY, top, ph));
+                area.lineTo(px(samples.get(samples.size() - 1)[0], maxT, left, pw), top + ph);
+                area.closePath();
+                g2.setColor(new Color(33, 102, 214, 28));
+                g2.fill(area);
             }
-            area.lineTo(px(samples.get(samples.size() - 1)[0], maxT, left, pw), top + ph);
-            area.closePath();
-            g2.setColor(new Color(33, 102, 214, 28));
-            g2.fill(area);
 
             // ssthresh: duong bac thang net dut mau cam
             g2.setColor(ORANGE);
@@ -867,6 +888,10 @@ public class Visualizer {
                 g2.drawLine(px(a[0], maxT, left, pw), py(a[1], maxY, top, ph),
                         px(b[0], maxT, left, pw), py(b[1], maxY, top, ph));
             }
+
+            // RTO/SRTT: ve tren cung truc thoi gian, chia 100 de dat cung he truc voi cwnd.
+            drawRtoLine(g2, rtoSamples, 1, BLUE, maxT, maxY, left, pw, top, ph);
+            drawRtoLine(g2, rtoSamples, 2, PURPLE, maxT, maxY, left, pw, top, ph);
 
             // Cham do tai moi lan timeout, cham cam tai moi lan fast retransmit
             for (double[] s : samples) {
@@ -908,6 +933,30 @@ public class Visualizer {
             g2.fillOval(x, y - 10, 10, 10);
             g2.setColor(new Color(70, 70, 70));
             g2.drawString("fast retransmit", x + 16, y);
+            x += 105;
+            g2.setColor(BLUE);
+            g2.setStroke(new BasicStroke(1.8f));
+            g2.drawLine(x, y - 4, x + 20, y - 4);
+            g2.setColor(new Color(70, 70, 70));
+            g2.drawString("SRTT", x + 26, y);
+            x += 70;
+            g2.setColor(PURPLE);
+            g2.setStroke(new BasicStroke(1.8f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f,
+                    new float[]{5f, 4f}, 0f));
+            g2.drawLine(x, y - 4, x + 20, y - 4);
+            g2.setColor(new Color(70, 70, 70));
+            g2.drawString("RTO", x + 26, y);
+        }
+
+        private static void drawRtoLine(Graphics2D g2, List<double[]> values, int index, Color color,
+                                        double maxT, double maxY, int left, int pw, int top, int ph) {
+            g2.setColor(color);
+            g2.setStroke(new BasicStroke(1.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            for (int i = 1; i < values.size(); i++) {
+                double[] a = values.get(i - 1), b = values.get(i);
+                g2.drawLine(px(a[0], maxT, left, pw), py(a[index] / 100.0, maxY, top, ph),
+                        px(b[0], maxT, left, pw), py(b[index] / 100.0, maxY, top, ph));
+            }
         }
 
         private static int px(double t, double maxT, int left, int pw) {

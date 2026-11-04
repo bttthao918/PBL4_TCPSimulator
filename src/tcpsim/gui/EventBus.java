@@ -42,6 +42,20 @@ public class EventBus {
         return result;
     }
 
+    // Moi mau la double[]{thoi_gian_ms, SRTT_ms, RTO_ms}.
+    private static final ConcurrentLinkedQueue<double[]> rtoQueue = new ConcurrentLinkedQueue<>();
+
+    public static void publishRto(double timeMs, double srttMs, double rtoMs) {
+        rtoQueue.add(new double[]{timeMs, srttMs, rtoMs});
+    }
+
+    public static List<double[]> drainRto() {
+        List<double[]> result = new ArrayList<>();
+        double[] sample;
+        while ((sample = rtoQueue.poll()) != null) result.add(sample);
+        return result;
+    }
+
     // BUOC 4: hang doi bao cao ket qua phien (moi phien ket thuc dua len 1 bao cao).
     private static final ConcurrentLinkedQueue<SessionReport> reportQueue = new ConcurrentLinkedQueue<>();
 
@@ -58,6 +72,7 @@ public class EventBus {
     public static void clearAll() {
         drainAll();
         drainCwnd();
+        drainRto();
         reportQueue.clear();
     }
 
