@@ -24,22 +24,26 @@ public class NetworkSimulator {
 
     /** BUOC 4: so goi bi mat (gia lap) ke tu lan configure() gan nhat - de thong ke cuoi phien. */
     public static final java.util.concurrent.atomic.AtomicInteger lostCount = new java.util.concurrent.atomic.AtomicInteger();
+    public static final java.util.concurrent.atomic.AtomicInteger corruptedCount = new java.util.concurrent.atomic.AtomicInteger();
 
     static double packetLossRate = 0.0;
+    static double packetCorruptRate = 0.0;
     static int minDelayMs = 0;
     static int maxDelayMs = 0;
 
     static final Random random = new Random();
     static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
-    public static void configure(double lossRate, int minDelay, int maxDelay) {
+    public static void configure(double lossRate, double corruptRate, int minDelay, int maxDelay) {
         packetLossRate = lossRate;
+        packetCorruptRate = corruptRate;
         lostCount.set(0);
+        corruptedCount.set(0);
         minDelayMs = minDelay;
         maxDelayMs = maxDelay;
         log(String.format(
-            "Cau hinh mang: ti le mat goi=%.0f%%, do tre=%d-%dms",
-            lossRate * 100, minDelay, maxDelay
+            "Cau hinh mang: mat goi=%.0f%%, hong goi=%.0f%%, do tre=%d-%dms",
+            lossRate * 100, corruptRate * 100, minDelay, maxDelay
         ));
     }
 
@@ -70,7 +74,18 @@ public class NetworkSimulator {
             return false;
         }
 
-        // ---- Buoc 2: tinh do tre ngau nhien (neu co cau hinh) ----
+        // ---- Buoc 2: lat ngau nhien 1 bit roi van gui goi di ----
+        boolean corrupted = random.nextDouble() < packetCorruptRate;
+        if (corrupted && bytes.length > 0) {
+            int byteIndex = random.nextInt(bytes.length);
+            int bitMask = 1 << random.nextInt(8);
+            bytes[byteIndex] ^= (byte) bitMask;
+            corruptedCount.incrementAndGet();
+            log("[CORRUPTED] seq=" + packet.seqNum + " " + packet.flagsToString()
+                    + " -> lat 1 bit tai byte " + byteIndex + ".");
+        }
+
+        // ---- Buoc 3: tinh do tre ngau nhien (neu co cau hinh) ----
         int delay = 0;
         if (maxDelayMs > 0) {
             delay = minDelayMs + random.nextInt(maxDelayMs - minDelayMs + 1);
@@ -79,7 +94,8 @@ public class NetworkSimulator {
         // Bao su kien cho GUI NGAY LUC QUYET DINH GUI (giong thoi diem log
         // console "Da gui..." trong Client.java) - du goi tin co the con
         // dang "tren duong" (dang tre) thi vi tri ve tren so do van hop ly.
-        EventBus.publish(new PacketEvent(statusIfSent, direction, packet.flagsToString(),
+        PacketEvent.Status eventStatus = corrupted ? PacketEvent.Status.CORRUPTED : statusIfSent;
+        EventBus.publish(new PacketEvent(eventStatus, direction, packet.flagsToString(),
                 packet.seqNum, packet.ackNum, note));
 
         if (delay == 0) {

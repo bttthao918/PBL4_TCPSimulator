@@ -250,6 +250,7 @@ public class Client {
         SessionSettings initial = new SessionSettings();
         initial.serverIp = config.getOrDefault("server_ip", AUTO_SERVER);
         initial.lossPercent = (int) Math.round(Double.parseDouble(config.getOrDefault("loss_percent", "0")));
+        initial.corruptPercent = (int) Math.round(Double.parseDouble(config.getOrDefault("corrupt_percent", "0")));
         initial.delayMinMs = Integer.parseInt(config.getOrDefault("delay_min_ms", "0"));
         initial.delayMaxMs = Integer.parseInt(config.getOrDefault("delay_max_ms", "0"));
         initial.windowSize = Math.max(1, Integer.parseInt(config.getOrDefault("window_size", "32")));
@@ -260,8 +261,14 @@ public class Client {
         // Tham so dong lenh (neu co) GHI DE len file cau hinh - tien khi tu test nhanh.
         if (args.length >= 3) {
             initial.lossPercent = (int) Math.round(Double.parseDouble(args[0]));
-            initial.delayMinMs = Integer.parseInt(args[1]);
-            initial.delayMaxMs = Integer.parseInt(args[2]);
+            if (args.length >= 4) {
+                initial.corruptPercent = (int) Math.round(Double.parseDouble(args[1]));
+                initial.delayMinMs = Integer.parseInt(args[2]);
+                initial.delayMaxMs = Integer.parseInt(args[3]);
+            } else {
+                initial.delayMinMs = Integer.parseInt(args[1]);
+                initial.delayMaxMs = Integer.parseInt(args[2]);
+            }
         }
 
         // May khong co man hinh (vd chay tren server/CI): chay 1 phien, khong co GUI.
@@ -303,6 +310,7 @@ public class Client {
             report.fastRetransmits = statFastRetransmits.get();
             report.dataTransmissions = report.segments + report.retransmissions;
             report.lostPackets = NetworkSimulator.lostCount.get();
+            report.corruptedPackets = NetworkSimulator.corruptedCount.get();
             report.cwndReductions = congestion.reductions;
             report.maxCwnd = congestion.maxCwnd;
             EventBus.publishReport(report);
@@ -324,7 +332,7 @@ public class Client {
         congestion = new CongestionControl(s.congestionControl, s.ssthresh);
         int minDelay = Math.max(0, s.delayMinMs);
         int maxDelay = Math.max(minDelay, s.delayMaxMs);
-        NetworkSimulator.configure(s.lossPercent / 100.0, minDelay, maxDelay);
+        NetworkSimulator.configure(s.lossPercent / 100.0, s.corruptPercent / 100.0, minDelay, maxDelay);
 
         log("Cua so toi da (window_size) = " + windowSize + " segment | dieu khien tac nghen: "
                 + (s.congestionControl ? "BAT (ssthresh ban dau=" + s.ssthresh + ")" : "TAT")
@@ -706,8 +714,20 @@ public class Client {
 
     static Packet receiveRaw() throws Exception {
         byte[] buffer = new byte[2048];
-        DatagramPacket datagram = new DatagramPacket(buffer, buffer.length);
-        clientSocket.receive(datagram);
-        return Packet.decode(datagram.getData(), datagram.getLength());
+        while (true) {
+            DatagramPacket datagram = new DatagramPacket(buffer, buffer.length);
+            clientSocket.receive(datagram);
+            if (datagram.getLength() < Packet.HEADER_SIZE) {
+                log("Bo qua goi nhan duoc vi thieu header (" + datagram.getLength() + " byte).");
+                continue;
+            }
+            Packet packet = Packet.decode(datagram.getData(), datagram.getLength());
+            if (!packet.checksumValid) {
+                log("Bo qua goi nhan duoc vi sai checksum: seq=" + packet.seqNum
+                        + ", ack=" + packet.ackNum + ", flags=" + packet.flagsToString());
+                continue;
+            }
+            return packet;
+        }
     }
 }

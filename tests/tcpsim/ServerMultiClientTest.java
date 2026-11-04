@@ -15,6 +15,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32;
 
+import tcpsim.gui.EventBus;
+import tcpsim.gui.SessionReport;
+import tcpsim.gui.SessionSettings;
+
 /** Integration tests using real UDP sockets; no external test dependencies. */
 public class ServerMultiClientTest {
     private static final byte[] EMPTY = new byte[0];
@@ -22,7 +26,8 @@ public class ServerMultiClientTest {
     private static final int START_SEQ = ISN + 1;
 
     public static void main(String[] args) throws Exception {
-        NetworkSimulator.configure(0, 0, 0);
+        testChecksumRejectsHeaderAndPayloadCorruption();
+        NetworkSimulator.configure(0, 0, 0, 0);
         AtomicReference<Throwable> serverFailure = new AtomicReference<>();
         try (DatagramSocket server = new DatagramSocket(0, InetAddress.getLoopbackAddress())) {
             Thread serverThread = new Thread(() -> {
@@ -43,7 +48,53 @@ public class ServerMultiClientTest {
             }
         }
         if (serverFailure.get() != null) throw new AssertionError("Server failed", serverFailure.get());
+        testClientSessionWithCorruption();
         System.out.println("PASS: independent sessions, retries, reconnects, UTF-8, and 8 concurrent clients.");
+    }
+
+    private static void testClientSessionWithCorruption() throws Exception {
+        EventBus.clearAll();
+        AtomicReference<Throwable> serverFailure = new AtomicReference<>();
+        try (DatagramSocket server = new DatagramSocket(Server.PORT, InetAddress.getLoopbackAddress())) {
+            Thread serverThread = new Thread(() -> {
+                try {
+                    Server.serve(server);
+                } catch (Throwable e) {
+                    if (!server.isClosed()) serverFailure.set(e);
+                }
+            }, "CorruptionTestServer");
+            serverThread.setDaemon(true);
+            serverThread.start();
+
+            SessionSettings settings = new SessionSettings();
+            settings.serverIp = "127.0.0.1";
+            settings.corruptPercent = 10;
+            settings.messageRepeat = 1;
+            Client.runSession(settings);
+            SessionReport report = EventBus.pollReport();
+            check(report != null, "Client session must publish a report");
+            check(report.dataCheck.equals("DUNG"),
+                    "10% corruption must still recover correct data, got " + report.dataCheck);
+            server.close();
+            serverThread.join(3000);
+        }
+        if (serverFailure.get() != null) throw new AssertionError("Corruption server failed", serverFailure.get());
+    }
+
+    private static void testChecksumRejectsHeaderAndPayloadCorruption() {
+        Packet original = new Packet(1234, 5678, Packet.FLAG_ACK, new byte[]{10, 20, 30});
+        byte[] headerCorrupted = original.encode();
+        headerCorrupted[0] ^= 0x01; // seq_num
+        check(!Packet.decode(headerCorrupted, headerCorrupted.length).checksumValid,
+                "Header corruption must fail checksum");
+
+        byte[] payloadCorrupted = original.encode();
+        payloadCorrupted[Packet.HEADER_SIZE] ^= 0x01;
+        check(!Packet.decode(payloadCorrupted, payloadCorrupted.length).checksumValid,
+                "Payload corruption must fail checksum");
+
+        check(Packet.decode(original.encode(), original.encode().length).checksumValid,
+                "Unmodified packet must pass checksum");
     }
 
     private static void testInterleavedSessions(int port) throws Exception {

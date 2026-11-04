@@ -24,7 +24,6 @@ import java.util.List;
  */
 public class Visualizer {
 
-    private static final int MAX_EVENTS_KEPT = 500;
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
     // Bang mau thong nhat
@@ -32,6 +31,7 @@ public class Visualizer {
     private static final Color GREEN = new Color(46, 125, 50);
     private static final Color RED = new Color(198, 40, 40);
     private static final Color ORANGE = new Color(239, 130, 0);
+    private static final Color PURPLE = new Color(123, 63, 160);
     private static final Color GRAY = new Color(130, 130, 130);
     private static final Color TEXT_MUTED = new Color(110, 110, 110);
     private static final Color PANEL_BG = new Color(246, 247, 249);
@@ -41,12 +41,14 @@ public class Visualizer {
 
     private final JFrame frame;
     private final DiagramPanel diagramPanel;
+    private final JScrollPane diagramScroll;
     private final ChartPanel chartPanel;
     private final DefaultTableModel tableModel;
 
     // ---- Cot cau hinh ----
     private final JTextField ipField;
     private final JSpinner lossSpinner;
+    private final JSpinner corruptSpinner;
     private final JSpinner delayMinSpinner;
     private final JSpinner delayMaxSpinner;
     private final JSpinner windowSpinner;
@@ -59,7 +61,7 @@ public class Visualizer {
     private final JLabel resultBadge;
     private final JLabel reasonLabel;
     private final JLabel valData, valTime, valPhases, valSpeed, valSegments, valSends, valRetrans, valFast,
-            valLost, valCwndDrops, valCwndMax;
+            valLost, valCorrupt, valCwndDrops, valCwndMax;
 
     // ---- Dai trang thai song ----
     private final JLabel phaseBadge;
@@ -71,6 +73,7 @@ public class Visualizer {
     private int sentCount = 0;
     private int retransCount = 0;
     private int lostCount = 0;
+    private int corruptCount = 0;
     private int ackCount = 0;
     private double[] lastSample = null;
 
@@ -87,6 +90,7 @@ public class Visualizer {
         ipField = new JTextField(initial.serverIp);
         ipField.setName("ipField");
         lossSpinner = spinner("lossSpinner", initial.lossPercent, 0, 90, 5);
+        corruptSpinner = spinner("corruptSpinner", initial.corruptPercent, 0, 100, 5);
         delayMinSpinner = spinner("delayMinSpinner", initial.delayMinMs, 0, 3000, 50);
         delayMaxSpinner = spinner("delayMaxSpinner", initial.delayMaxMs, 0, 3000, 50);
         windowSpinner = spinner("windowSpinner", initial.windowSize, 1, 64, 1);
@@ -116,6 +120,7 @@ public class Visualizer {
         int r = 0;
         addFormRow(form, r++, "Server IP", ipField);
         addFormRow(form, r++, "Mat goi (%)", lossSpinner);
+        addFormRow(form, r++, "Hong goi (%)", corruptSpinner);
         addFormRow(form, r++, "Tre min (ms)", delayMinSpinner);
         addFormRow(form, r++, "Tre max (ms)", delayMaxSpinner);
         addFormRow(form, r++, "Cua so toi da", windowSpinner);
@@ -167,6 +172,7 @@ public class Visualizer {
         valRetrans = metricRow(metrics, m++, "Gui lai", "valRetrans");
         valFast = metricRow(metrics, m++, "Fast retransmit", "valFast");
         valLost = metricRow(metrics, m++, "Mat goi gia lap", "valLost");
+        valCorrupt = metricRow(metrics, m++, "Goi bi hong", "valCorrupt");
         valCwndDrops = metricRow(metrics, m++, "cwnd giam (timeout)", "valCwndDrops");
         valCwndMax = metricRow(metrics, m++, "cwnd lon nhat", "valCwndMax");
         metrics.setBorder(new EmptyBorder(8, 0, 0, 0));
@@ -199,6 +205,12 @@ public class Visualizer {
 
         // ================= Phan giua: 2 tab =================
         diagramPanel = new DiagramPanel();
+        diagramScroll = new JScrollPane(diagramPanel);
+        diagramScroll.setBorder(null);
+        diagramScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        diagramScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        diagramScroll.getViewport().setBackground(Color.WHITE);
+        diagramScroll.getVerticalScrollBar().setUnitIncrement(DiagramPanel.ROW_HEIGHT);
         chartPanel = new ChartPanel();
 
         JPanel visual = new JPanel(new GridBagLayout());
@@ -209,7 +221,7 @@ public class Visualizer {
         gc.gridy = 0;
         gc.gridx = 0;
         gc.weightx = 0.42;
-        visual.add(diagramPanel, gc);
+        visual.add(diagramScroll, gc);
         gc.gridx = 1;
         gc.weightx = 0.58;
         visual.add(chartPanel, gc);
@@ -373,6 +385,7 @@ public class Visualizer {
         SessionSettings s = new SessionSettings();
         s.serverIp = ipField.getText().trim().isEmpty() ? "auto" : ipField.getText().trim();
         s.lossPercent = intValue(lossSpinner);
+        s.corruptPercent = intValue(corruptSpinner);
         s.delayMinMs = intValue(delayMinSpinner);
         s.delayMaxMs = intValue(delayMaxSpinner);
         s.windowSize = intValue(windowSpinner);
@@ -413,10 +426,21 @@ public class Visualizer {
         chartPanel.clear();
         tableModel.setRowCount(0);
         sentCount = retransCount = lostCount = ackCount = 0;
+        corruptCount = 0;
         lastSample = null;
         updateStatusBar();
         diagramPanel.repaint();
         chartPanel.repaint();
+    }
+
+    private boolean diagramIsAtBottom() {
+        JScrollBar bar = diagramScroll.getVerticalScrollBar();
+        return bar.getValue() + bar.getVisibleAmount() >= bar.getMaximum() - DiagramPanel.ROW_HEIGHT;
+    }
+
+    private void scrollDiagramToBottom() {
+        JScrollBar bar = diagramScroll.getVerticalScrollBar();
+        bar.setValue(bar.getMaximum());
     }
 
     // =====================================================================
@@ -425,6 +449,7 @@ public class Visualizer {
     private void refresh() {
         List<PacketEvent> newEvents = EventBus.drainAll();
         List<double[]> newSamples = EventBus.drainCwnd();
+        boolean followDiagram = diagramIsAtBottom();
 
         for (PacketEvent event : newEvents) {
             diagramPanel.addEvent(event);
@@ -445,8 +470,12 @@ public class Visualizer {
         }
         if (!newEvents.isEmpty() || !newSamples.isEmpty()) {
             updateStatusBar();
+            diagramPanel.revalidate();
             diagramPanel.repaint();
             chartPanel.repaint();
+            if (!newEvents.isEmpty() && followDiagram) {
+                SwingUtilities.invokeLater(this::scrollDiagramToBottom);
+            }
         }
 
         SessionReport report = EventBus.pollReport();
@@ -466,6 +495,9 @@ public class Visualizer {
                 break;
             case LOST:
                 lostCount++;
+                break;
+            case CORRUPTED:
+                corruptCount++;
                 break;
             case ACKED:
                 if (event.packetType.equals("ACK")) ackCount++;
@@ -489,7 +521,8 @@ public class Visualizer {
             ssthreshLabel.setText(String.format("<html>ssthresh <b>%.0f</b></html>", lastSample[2]));
         }
         countersLabel.setText("Da gui " + sentCount + "     Gui lai " + retransCount
-                + "     Mat goi " + lostCount + "     ACK nhan " + ackCount);
+                + "     Mat goi " + lostCount + "     Hong " + corruptCount
+                + "     ACK nhan " + ackCount);
     }
 
     // =====================================================================
@@ -497,7 +530,7 @@ public class Visualizer {
     // =====================================================================
     private void clearMetrics() {
         for (JLabel v : new JLabel[]{valData, valTime, valPhases, valSpeed, valSegments, valSends,
-                valRetrans, valFast, valLost, valCwndDrops, valCwndMax}) {
+                valRetrans, valFast, valLost, valCorrupt, valCwndDrops, valCwndMax}) {
             v.setText("-");
             v.setForeground(Color.BLACK);
         }
@@ -543,6 +576,7 @@ public class Visualizer {
         valRetrans.setText(String.format("%d  (%.0f%%)", r.retransmissions, retransPct));
         valFast.setText(r.fastRetransmits + " lan");
         valLost.setText(String.valueOf(r.lostPackets));
+        valCorrupt.setText(String.valueOf(r.corruptedPackets));
         if (r.ccEnabled) {
             valCwndDrops.setText(r.cwndReductions + " lan");
             valCwndMax.setText(String.format("%.1f", r.maxCwnd));
@@ -570,6 +604,7 @@ public class Visualizer {
             case SENT: return "Da gui";
             case ACKED: return "Da xac nhan (ACK)";
             case LOST: return "MAT GOI";
+            case CORRUPTED: return "GOI BI HONG";
             case RETRANSMITTED: return "GUI LAI";
             default: return status.toString();
         }
@@ -580,6 +615,7 @@ public class Visualizer {
             case SENT: return new Color(110, 118, 130);
             case ACKED: return GREEN;
             case LOST: return RED;
+            case CORRUPTED: return PURPLE;
             case RETRANSMITTED: return ORANGE;
             default: return Color.BLACK;
         }
@@ -599,13 +635,18 @@ public class Visualizer {
 
         void addEvent(PacketEvent event) {
             events.add(event);
-            while (events.size() > MAX_EVENTS_KEPT) {
-                events.remove(0);
-            }
         }
 
         void clear() {
             events.clear();
+            revalidate();
+        }
+
+        @Override
+        public Dimension getPreferredSize() {
+            int rows = Math.max(1, events.size());
+            int height = 100 + rows * ROW_HEIGHT;
+            return new Dimension(Math.max(420, super.getPreferredSize().width), height);
         }
 
         @Override
@@ -642,11 +683,8 @@ public class Visualizer {
                 return;
             }
 
-            int slots = Math.max(1, (bottomY - topY) / ROW_HEIGHT);
-            int start = Math.max(0, events.size() - slots);
-
             int y = topY + 14;
-            for (PacketEvent event : events.subList(start, events.size())) {
+            for (PacketEvent event : events) {
                 boolean clientToServer = event.direction.startsWith("Client");
                 int fromX = clientToServer ? leftX : rightX;
                 int toX = clientToServer ? rightX : leftX;
@@ -694,9 +732,9 @@ public class Visualizer {
         }
 
         private void drawLegend(Graphics2D g2, int height, int width) {
-            String[] names = {"Da gui", "ACK", "Mat goi", "Gui lai"};
+            String[] names = {"Da gui", "ACK", "Mat goi", "Hong", "Gui lai"};
             PacketEvent.Status[] statuses = {PacketEvent.Status.SENT, PacketEvent.Status.ACKED,
-                    PacketEvent.Status.LOST, PacketEvent.Status.RETRANSMITTED};
+                    PacketEvent.Status.LOST, PacketEvent.Status.CORRUPTED, PacketEvent.Status.RETRANSMITTED};
             g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 12f));
             FontMetrics fm = g2.getFontMetrics();
             int total = 0;

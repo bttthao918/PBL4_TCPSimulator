@@ -1,5 +1,6 @@
 package tcpsim;
 import java.nio.ByteBuffer;
+import java.util.zip.CRC32;
 
 /**
  * Packet.java
@@ -54,7 +55,7 @@ public class Packet {
         this.ackNum = ackNum;
         this.flags = flags;
         this.payload = (payload != null) ? payload : new byte[0];
-        this.checksum = calculateChecksum(this.payload);
+        this.checksum = calculateChecksum(this.seqNum, this.ackNum, this.flags, this.payload);
     }
 
     // -----------------------------------------------------------------
@@ -67,13 +68,20 @@ public class Packet {
      * Đây là cách làm đơn giản (đủ cho đồ án); TCP thật dùng thuật toán
      * phức tạp hơn (one's complement), nhưng nguyên lý tương tự.
      */
-    public static int calculateChecksum(byte[] data) {
-        int sum = 0;
-        for (byte b : data) {
-            // "& 0xFF" để lấy đúng giá trị byte không âm (Java byte có dấu)
-            sum += (b & 0xFF);
-        }
-        return sum;
+    /**
+     * Returns CRC32 over the wire header fields before checksum plus payload.
+     * The checksum field itself is intentionally excluded from this input.
+     */
+    public static int calculateChecksum(int seqNum, int ackNum, byte flags, byte[] payload) {
+        byte[] safePayload = payload == null ? new byte[0] : payload;
+        ByteBuffer protectedData = ByteBuffer.allocate(4 + 4 + 1 + safePayload.length);
+        protectedData.putInt(seqNum);
+        protectedData.putInt(ackNum);
+        protectedData.put(flags);
+        protectedData.put(safePayload);
+        CRC32 crc = new CRC32();
+        crc.update(protectedData.array());
+        return (int) crc.getValue();
     }
 
     // -----------------------------------------------------------------
@@ -120,7 +128,7 @@ public class Packet {
         // Ghi đè checksum bằng giá trị ĐỌC ĐƯỢC (không tính lại),
         // rồi so sánh với checksum tính từ payload thật để kiểm tra lỗi.
         packet.checksum = checksum;
-        packet.checksumValid = (calculateChecksum(payload) == checksum);
+        packet.checksumValid = (calculateChecksum(seqNum, ackNum, flags, payload) == checksum);
         return packet;
     }
 

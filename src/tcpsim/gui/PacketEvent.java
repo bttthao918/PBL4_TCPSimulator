@@ -16,6 +16,7 @@ public class PacketEvent {
         SENT,            // vua gui di, dang cho ACK - mau xam/vang
         ACKED,           // da duoc xac nhan - mau xanh la
         LOST,            // bi mat tren duong truyen (NetworkSimulator biet duoc) - mau do
+        CORRUPTED,       // da gui nhung bi lat bit tren duong truyen - mau tim
         RETRANSMITTED    // bi gui lai do qua han (RTO) - mau cam
     }
 

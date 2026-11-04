@@ -10,6 +10,7 @@ public class SessionSettings {
     /** "auto" lets Client discover the server on the local LAN. */
     public String serverIp = "auto";
     public int lossPercent = 0;          // ti le mat goi gia lap cua Client (%)
+    public int corruptPercent = 0;       // ti le lam hong goi gia lap (%)
     public int delayMinMs = 0;           // do tre toi thieu moi goi (ms)
     public int delayMaxMs = 0;           // do tre toi da moi goi (ms)
     public int windowSize = 32;          // so segment toi da duoc dang bay

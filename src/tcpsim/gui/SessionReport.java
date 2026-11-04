@@ -19,6 +19,7 @@ public class SessionReport {
     public int retransmissions = 0;      // so luot gui lai
     public int fastRetransmits = 0;      // so lan gui lai nhanh do 3 ACK trung lap
     public int lostPackets = 0;          // so goi bi mat do mo phong tren Client
+    public int corruptedPackets = 0;     // so goi bi lat bit do mo phong tren Client
     public int cwndReductions = 0;       // so lan cwnd bi giam do timeout
     public double maxCwnd = 0;           // cwnd lon nhat dat duoc
     public boolean ccEnabled = true;     // dieu khien tac nghen co bat khong

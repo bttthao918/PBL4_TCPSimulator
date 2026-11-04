@@ -23,7 +23,7 @@ import tcpsim.gui.PacketEvent;
 /**
  * Mo phong TCP tren UDP: mot socket lang nghe, moi IP + cong Client co phien rieng.
  * Cac goi tin duoc xu ly xen ke, khong cho mot Client ket thuc moi nhan Client khac.
- * Cau hinh mang doc tu server-config.txt hoac ba tham so: loss%, delayMin, delayMax.
+ * Cau hinh mang doc tu server-config.txt hoac bon tham so: loss%, corrupt%, delayMin, delayMax.
  */
 public class Server {
 
@@ -96,14 +96,21 @@ public class Server {
     public static void main(String[] args) throws Exception {
         Map<String, String> config = loadConfig("server-config.txt");
         double lossRate = Double.parseDouble(config.getOrDefault("loss_percent", "0")) / 100.0;
+        double corruptRate = Double.parseDouble(config.getOrDefault("corrupt_percent", "0")) / 100.0;
         int minDelay = Integer.parseInt(config.getOrDefault("delay_min_ms", "0"));
         int maxDelay = Integer.parseInt(config.getOrDefault("delay_max_ms", "0"));
         if (args.length >= 3) {
             lossRate = Double.parseDouble(args[0]) / 100.0;
-            minDelay = Integer.parseInt(args[1]);
-            maxDelay = Integer.parseInt(args[2]);
+            if (args.length >= 4) {
+                corruptRate = Double.parseDouble(args[1]) / 100.0;
+                minDelay = Integer.parseInt(args[2]);
+                maxDelay = Integer.parseInt(args[3]);
+            } else {
+                minDelay = Integer.parseInt(args[1]);
+                maxDelay = Integer.parseInt(args[2]);
+            }
         }
-        NetworkSimulator.configure(lossRate, minDelay, maxDelay);
+        NetworkSimulator.configure(lossRate, corruptRate, minDelay, maxDelay);
 
         try (DatagramSocket serverSocket = new DatagramSocket(PORT)) {
             serve(serverSocket);
@@ -154,7 +161,7 @@ public class Server {
             }
             Packet packet = Packet.decode(datagram.getData(), datagram.getLength());
             if (!packet.checksumValid) {
-                log("[Client " + clientAddress + "] Bo qua goi tin sai checksum.");
+                log("[Client " + clientAddress + "] Bo qua goi tin sai checksum (co the da bi hong).");
                 continue;
             }
 
