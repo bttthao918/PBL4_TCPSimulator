@@ -68,6 +68,7 @@ public class Visualizer {
     private final JLabel phaseBadge;
     private final JLabel cwndLabel;
     private final JLabel ssthreshLabel;
+    private final JLabel rwndLabel;
     private final JLabel countersLabel;
 
     // So lieu dem
@@ -78,6 +79,7 @@ public class Visualizer {
     private int ackCount = 0;
     private double[] lastSample = null;
     private String connectionState = "CLOSED";
+    private int currentRwnd = 65535;
 
     private Visualizer(SessionSettings initial, SessionRunner runner) {
         this.runner = runner;
@@ -199,11 +201,13 @@ public class Visualizer {
         phaseBadge.setBorder(new EmptyBorder(4, 10, 4, 10));
         cwndLabel = new JLabel();
         ssthreshLabel = new JLabel();
+        rwndLabel = new JLabel();
         countersLabel = new JLabel();
         countersLabel.setForeground(TEXT_MUTED);
         strip.add(phaseBadge);
         strip.add(cwndLabel);
         strip.add(ssthreshLabel);
+        strip.add(rwndLabel);
         strip.add(Box.createHorizontalStrut(30));
         strip.add(countersLabel);
         updateStatusBar();
@@ -435,6 +439,7 @@ public class Visualizer {
         corruptCount = 0;
         lastSample = null;
         connectionState = "CLOSED";
+        currentRwnd = 65535;
         updateStatusBar();
         diagramPanel.repaint();
         chartPanel.repaint();
@@ -457,6 +462,7 @@ public class Visualizer {
         List<PacketEvent> newEvents = EventBus.drainAll();
         List<double[]> newSamples = EventBus.drainCwnd();
         List<double[]> newRtoSamples = EventBus.drainRto();
+        List<double[]> newRwndSamples = EventBus.drainRwnd();
         boolean followDiagram = diagramIsAtBottom();
 
         for (PacketEvent event : newEvents) {
@@ -482,7 +488,11 @@ public class Visualizer {
             lastSample = sample;
         }
         for (double[] sample : newRtoSamples) chartPanel.addRtoSample(sample);
-        if (!newEvents.isEmpty() || !newSamples.isEmpty() || !newRtoSamples.isEmpty()) {
+        for (double[] sample : newRwndSamples) {
+            chartPanel.addRwndSample(sample);
+            currentRwnd = (int) sample[1];
+        }
+        if (!newEvents.isEmpty() || !newSamples.isEmpty() || !newRtoSamples.isEmpty() || !newRwndSamples.isEmpty()) {
             updateStatusBar();
             diagramPanel.revalidate();
             diagramPanel.repaint();
@@ -538,6 +548,7 @@ public class Visualizer {
             cwndLabel.setText(String.format("<html>cwnd <b>%.2f</b> (%s)</html>", lastSample[1], phaseName(type)));
             ssthreshLabel.setText(String.format("<html>ssthresh <b>%.0f</b></html>", lastSample[2]));
         }
+        rwndLabel.setText(String.format("<html>rwnd <b>%d</b> byte</html>", currentRwnd));
         countersLabel.setText("Da gui " + sentCount + "     Gui lai " + retransCount
                 + "     Mat goi " + lostCount + "     Hong " + corruptCount
                 + "     ACK nhan " + ackCount);
@@ -791,6 +802,7 @@ public class Visualizer {
     private static class ChartPanel extends JPanel {
         private final List<double[]> samples = new ArrayList<>();
         private final List<double[]> rtoSamples = new ArrayList<>();
+        private final List<double[]> rwndSamples = new ArrayList<>();
 
         ChartPanel() {
             setBackground(Color.WHITE);
@@ -804,9 +816,14 @@ public class Visualizer {
             rtoSamples.add(sample);
         }
 
+        void addRwndSample(double[] sample) {
+            rwndSamples.add(sample);
+        }
+
         void clear() {
             samples.clear();
             rtoSamples.clear();
+            rwndSamples.clear();
         }
 
         @Override
@@ -824,9 +841,9 @@ public class Visualizer {
 
             g2.setColor(new Color(40, 40, 40));
             g2.setFont(g2.getFont().deriveFont(Font.BOLD, 14f));
-            g2.drawString("cwnd va RTO (RTO/SRTT quy doi 100 ms)", left, 28);
+            g2.drawString("cwnd, rwnd va RTO (rwnd/8 byte; RTO/SRTT quy doi 100 ms)", left, 28);
 
-            if (samples.size() < 2 && rtoSamples.size() < 2) {
+            if (samples.size() < 2 && rtoSamples.size() < 2 && rwndSamples.size() < 2) {
                 g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 13f));
                 g2.setColor(GRAY);
                 g2.drawString("Chua co du lieu cwnd", left + 10, h / 2);
@@ -837,6 +854,7 @@ public class Visualizer {
             double maxT = 1;
             if (!samples.isEmpty()) maxT = Math.max(maxT, samples.get(samples.size() - 1)[0]);
             if (!rtoSamples.isEmpty()) maxT = Math.max(maxT, rtoSamples.get(rtoSamples.size() - 1)[0]);
+            if (!rwndSamples.isEmpty()) maxT = Math.max(maxT, rwndSamples.get(rwndSamples.size() - 1)[0]);
             double maxY = 4;
             for (double[] s : samples) {
                 maxY = Math.max(maxY, Math.max(s[1], s[2]));
@@ -844,6 +862,7 @@ public class Visualizer {
             for (double[] s : rtoSamples) {
                 maxY = Math.max(maxY, Math.max(s[1], s[2]) / 100.0);
             }
+            for (double[] s : rwndSamples) maxY = Math.max(maxY, s[1] / 8.0);
             maxY = Math.ceil(maxY + 1);
 
             // Luoi ngang + nhan truc Y
@@ -908,6 +927,7 @@ public class Visualizer {
             // RTO/SRTT: ve tren cung truc thoi gian, chia 100 de dat cung he truc voi cwnd.
             drawRtoLine(g2, rtoSamples, 1, BLUE, maxT, maxY, left, pw, top, ph);
             drawRtoLine(g2, rtoSamples, 2, PURPLE, maxT, maxY, left, pw, top, ph);
+            drawRwndLine(g2, rwndSamples, maxT, maxY, left, pw, top, ph);
 
             // Cham do tai moi lan timeout, cham cam tai moi lan fast retransmit
             for (double[] s : samples) {
@@ -962,6 +982,23 @@ public class Visualizer {
             g2.drawLine(x, y - 4, x + 20, y - 4);
             g2.setColor(new Color(70, 70, 70));
             g2.drawString("RTO", x + 26, y);
+            x += 70;
+            g2.setColor(GREEN);
+            g2.setStroke(new BasicStroke(1.8f));
+            g2.drawLine(x, y - 4, x + 20, y - 4);
+            g2.setColor(new Color(70, 70, 70));
+            g2.drawString("rwnd/8", x + 26, y);
+        }
+
+        private static void drawRwndLine(Graphics2D g2, List<double[]> values,
+                                         double maxT, double maxY, int left, int pw, int top, int ph) {
+            g2.setColor(GREEN);
+            g2.setStroke(new BasicStroke(2f));
+            for (int i = 1; i < values.size(); i++) {
+                double[] a = values.get(i - 1), b = values.get(i);
+                g2.drawLine(px(a[0], maxT, left, pw), py(a[1] / 8.0, maxY, top, ph),
+                        px(b[0], maxT, left, pw), py(b[1] / 8.0, maxY, top, ph));
+            }
         }
 
         private static void drawRtoLine(Graphics2D g2, List<double[]> values, int index, Color color,

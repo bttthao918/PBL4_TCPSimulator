@@ -26,22 +26,30 @@ public class PacketEvent {
     public final String packetType;  // vi du: "SYN", "SYN+ACK", "DATA", "FIN", "ACK"
     public final int seqNum;
     public final int ackNum;
+    public final int window;
     public final String note;        // ghi chu them, vi du noi dung payload
     public final boolean retransmissionAttempt;
 
     public PacketEvent(Status status, String direction, String packetType,
                         int seqNum, int ackNum, String note) {
-        this(status, direction, packetType, seqNum, ackNum, note, status == Status.RETRANSMITTED);
+        this(status, direction, packetType, seqNum, ackNum, -1, note, status == Status.RETRANSMITTED);
     }
 
     public PacketEvent(Status status, String direction, String packetType,
                         int seqNum, int ackNum, String note, boolean retransmissionAttempt) {
+        this(status, direction, packetType, seqNum, ackNum, -1, note, retransmissionAttempt);
+    }
+
+    public PacketEvent(Status status, String direction, String packetType,
+                        int seqNum, int ackNum, int window, String note,
+                        boolean retransmissionAttempt) {
         this.time = LocalTime.now();
         this.status = status;
         this.direction = direction;
         this.packetType = packetType;
         this.seqNum = seqNum;
         this.ackNum = ackNum;
+        this.window = window;
         this.note = note;
         this.retransmissionAttempt = retransmissionAttempt;
     }

@@ -33,6 +33,9 @@ public class Server {
     static final int BUFFER_SIZE = 2048;
     static final int SESSION_CLEANUP_INTERVAL_MS = 1000;
     static final long SESSION_IDLE_TIMEOUT_NS = TimeUnit.MINUTES.toNanos(2);
+    static int RECEIVE_BUFFER_BYTES = 65535;
+    static int APP_READ_BYTES = 65535;
+    static int APP_READ_INTERVAL_MS = 1;
 
     enum ConnectionState { SYN_RECEIVED, ESTABLISHED, CLOSE_WAIT, LAST_ACK, CLOSED }
 
@@ -50,6 +53,8 @@ public class Server {
         int serverFinSeq = -1;
         int finRetryCount = 0;
         long finSentAtMs = 0;
+        int receiveBufferBytes = 0;
+        long lastAppReadMs = System.currentTimeMillis();
         long lastActivityNs = System.nanoTime();
 
         ClientSession(InetSocketAddress address, int clientIsn) {
@@ -102,6 +107,10 @@ public class Server {
         double corruptRate = Double.parseDouble(config.getOrDefault("corrupt_percent", "0")) / 100.0;
         int minDelay = Integer.parseInt(config.getOrDefault("delay_min_ms", "0"));
         int maxDelay = Integer.parseInt(config.getOrDefault("delay_max_ms", "0"));
+        RECEIVE_BUFFER_BYTES = Math.max(1, Math.min(65535,
+                Integer.parseInt(config.getOrDefault("receive_buffer_bytes", "65535"))));
+        APP_READ_BYTES = Math.max(1, Integer.parseInt(config.getOrDefault("app_read_bytes", "65535")));
+        APP_READ_INTERVAL_MS = Math.max(1, Integer.parseInt(config.getOrDefault("app_read_interval_ms", "1")));
         if (args.length >= 3) {
             lossRate = Double.parseDouble(args[0]) / 100.0;
             if (args.length >= 4) {
@@ -128,12 +137,18 @@ public class Server {
         Map<InetSocketAddress, ClientSession> sessions = new HashMap<>();
         serverSocket.setSoTimeout(SESSION_CLEANUP_INTERVAL_MS);
         long lastCleanupNs = System.nanoTime();
+        long lastAppReadMs = System.currentTimeMillis();
         log("Server dang lang nghe tai cong " + serverSocket.getLocalPort()
                 + " | san sang phuc vu nhieu Client dong thoi.");
         byte[] receiveBuffer = new byte[BUFFER_SIZE];
 
         while (!serverSocket.isClosed()) {
             long now = System.nanoTime();
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - lastAppReadMs >= APP_READ_INTERVAL_MS) {
+                for (ClientSession session : sessions.values()) drainApplication(session, nowMs);
+                lastAppReadMs = nowMs;
+            }
             if (now - lastCleanupNs >= TimeUnit.MILLISECONDS.toNanos(SESSION_CLEANUP_INTERVAL_MS)) {
                 sessions.values().removeIf(session -> {
                     if (now - session.lastActivityNs < SESSION_IDLE_TIMEOUT_NS) return false;
@@ -287,21 +302,44 @@ public class Server {
             return;
         }
 
+        // ACK-only packets are also used as zero-window probes.
+        if (packet.flags == Packet.FLAG_ACK && packet.payload.length == 0) {
+            sendDataAck(socket, session);
+            return;
+        }
+
         if (packet.flags != 0 || packet.payload.length == 0) {
             session.log("Bo qua goi dieu khien khong phai du lieu.");
             return;
         }
         if (packet.seqNum == session.expectedDataSeq) {
+            if (packet.payload.length > availableReceiveWindow(session)) {
+                session.log("Bo qua DATA vi day bo dem, rwnd=0.");
+                sendDataAck(socket, session);
+                return;
+            }
             session.receivedData.write(packet.payload, 0, packet.payload.length);
+            session.receiveBufferBytes += packet.payload.length;
             session.expectedDataSeq += packet.payload.length;
             while (session.outOfOrderBuffer.containsKey(session.expectedDataSeq)) {
                 byte[] bufferedPayload = session.outOfOrderBuffer.remove(session.expectedDataSeq);
+                if (bufferedPayload.length > availableReceiveWindow(session)) {
+                    session.outOfOrderBuffer.put(session.expectedDataSeq, bufferedPayload);
+                    break;
+                }
                 session.receivedData.write(bufferedPayload, 0, bufferedPayload.length);
+                session.receiveBufferBytes += bufferedPayload.length;
                 session.expectedDataSeq += bufferedPayload.length;
             }
             session.log("Da rap du lieu, cho tiep seq=" + session.expectedDataSeq);
         } else if (packet.seqNum > session.expectedDataSeq) {
-            session.outOfOrderBuffer.putIfAbsent(packet.seqNum, packet.payload);
+            if (!session.outOfOrderBuffer.containsKey(packet.seqNum)
+                    && packet.payload.length <= availableReceiveWindow(session)) {
+                session.outOfOrderBuffer.put(packet.seqNum, packet.payload);
+                session.receiveBufferBytes += packet.payload.length;
+            } else if (packet.payload.length > availableReceiveWindow(session)) {
+                session.log("Bo qua DATA ngoai thu tu vi day bo dem.");
+            }
             session.log("Segment khong dung thu tu -> luu tam, dang cho seq=" + session.expectedDataSeq);
         } else {
             session.log("Segment trung lap -> bo qua.");
@@ -311,26 +349,27 @@ public class Server {
 
     private static void sendSynAck(DatagramSocket socket, ClientSession session, PacketEvent.Status status) {
         send(socket, session, new Packet(session.serverIsn, session.clientIsn + 1,
-                (byte) (Packet.FLAG_SYN | Packet.FLAG_ACK), new byte[0]), status);
+                (byte) (Packet.FLAG_SYN | Packet.FLAG_ACK), availableReceiveWindow(session), new byte[0]), status);
         session.log("Da gui SYN-ACK (seq=" + session.serverIsn + ", ack=" + (session.clientIsn + 1) + ").");
     }
 
     private static void sendDataAck(DatagramSocket socket, ClientSession session) {
-        send(socket, session, new Packet(0, session.expectedDataSeq, Packet.FLAG_ACK, new byte[0]),
+        send(socket, session, new Packet(0, session.expectedDataSeq, Packet.FLAG_ACK,
+                        availableReceiveWindow(session), new byte[0]),
                 PacketEvent.Status.SENT);
-        session.log("Da gui ACK, ack=" + session.expectedDataSeq);
+        session.log("Da gui ACK, ack=" + session.expectedDataSeq + ", rwnd=" + availableReceiveWindow(session));
     }
 
     private static void sendFin(DatagramSocket socket, ClientSession session, PacketEvent.Status status) {
         session.finSentAtMs = System.currentTimeMillis();
         send(socket, session, new Packet(session.serverFinSeq, session.lastFinSeq + 1,
-                Packet.FLAG_FIN, new byte[0]), status);
+                Packet.FLAG_FIN, availableReceiveWindow(session), new byte[0]), status);
         session.log("Da gui FIN cua Server (seq=" + session.serverFinSeq + ").");
     }
 
     private static void sendFinAck(DatagramSocket socket, ClientSession session, PacketEvent.Status status) {
         send(socket, session, new Packet(0, session.lastFinSeq + 1, Packet.FLAG_ACK,
-                session.lastFinAckPayload), status);
+                availableReceiveWindow(session), session.lastFinAckPayload), status);
         if (session.state == ConnectionState.CLOSE_WAIT) {
             changeState(session, ConnectionState.LAST_ACK);
         }
@@ -340,6 +379,18 @@ public class Server {
     private static void sendStateless(DatagramSocket socket, InetSocketAddress address, Packet packet) {
         NetworkSimulator.send(socket, packet, address.getAddress(), address.getPort(),
                 "Server -> Client " + address, PacketEvent.Status.SENT);
+    }
+
+    private static int availableReceiveWindow(ClientSession session) {
+        return Math.max(0, RECEIVE_BUFFER_BYTES - session.receiveBufferBytes);
+    }
+
+    private static void drainApplication(ClientSession session, long nowMs) {
+        if (nowMs - session.lastAppReadMs < APP_READ_INTERVAL_MS || session.receiveBufferBytes == 0) return;
+        int read = Math.min(APP_READ_BYTES, session.receiveBufferBytes);
+        session.receiveBufferBytes -= read;
+        session.lastAppReadMs = nowMs;
+        session.log("Ung dung doc " + read + " byte, rwnd=" + availableReceiveWindow(session));
     }
 
     private static void send(DatagramSocket socket, ClientSession session, Packet packet,

@@ -3,3 +3,8 @@ loss_percent=0
 corrupt_percent=0
 delay_min_ms=0
 delay_max_ms=0
+
+# Flow control (gia tri lon de khong anh huong thi nghiem cu)
+receive_buffer_bytes=65535
+app_read_bytes=65535
+app_read_interval_ms=1

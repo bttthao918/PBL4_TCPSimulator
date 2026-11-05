@@ -37,7 +37,7 @@ public class Packet {
     // Header gồm: seq_num (4 byte, int) + ack_num (4 byte, int)
     //           + flags (1 byte)         + checksum (4 byte, int)
     // => tổng cộng 13 byte, sau đó mới tới payload (dữ liệu thật).
-    public static final int HEADER_SIZE = 4 + 4 + 1 + 4; // = 13
+    public static final int HEADER_SIZE = 4 + 4 + 1 + 2 + 4; // = 15
 
     // -----------------------------------------------------------------
     // 3. CÁC TRƯỜNG DỮ LIỆU CỦA MỘT GÓI TIN (giống object/dict trong Python)
@@ -45,17 +45,23 @@ public class Packet {
     public int seqNum;
     public int ackNum;
     public byte flags;
+    public int window;
     public int checksum;
     public byte[] payload;
     public boolean checksumValid; // chỉ có ý nghĩa sau khi decode()
 
     // Constructor rỗng - dùng khi tự tạo packet để encode
     public Packet(int seqNum, int ackNum, byte flags, byte[] payload) {
+        this(seqNum, ackNum, flags, 65535, payload);
+    }
+
+    public Packet(int seqNum, int ackNum, byte flags, int window, byte[] payload) {
         this.seqNum = seqNum;
         this.ackNum = ackNum;
         this.flags = flags;
+        this.window = Math.max(0, Math.min(65535, window));
         this.payload = (payload != null) ? payload : new byte[0];
-        this.checksum = calculateChecksum(this.seqNum, this.ackNum, this.flags, this.payload);
+        this.checksum = calculateChecksum(this.seqNum, this.ackNum, this.flags, this.window, this.payload);
     }
 
     // -----------------------------------------------------------------
@@ -73,11 +79,16 @@ public class Packet {
      * The checksum field itself is intentionally excluded from this input.
      */
     public static int calculateChecksum(int seqNum, int ackNum, byte flags, byte[] payload) {
+        return calculateChecksum(seqNum, ackNum, flags, 65535, payload);
+    }
+
+    public static int calculateChecksum(int seqNum, int ackNum, byte flags, int window, byte[] payload) {
         byte[] safePayload = payload == null ? new byte[0] : payload;
-        ByteBuffer protectedData = ByteBuffer.allocate(4 + 4 + 1 + safePayload.length);
+        ByteBuffer protectedData = ByteBuffer.allocate(4 + 4 + 1 + 2 + safePayload.length);
         protectedData.putInt(seqNum);
         protectedData.putInt(ackNum);
         protectedData.put(flags);
+        protectedData.putShort((short) Math.max(0, Math.min(65535, window)));
         protectedData.put(safePayload);
         CRC32 crc = new CRC32();
         crc.update(protectedData.array());
@@ -98,6 +109,7 @@ public class Packet {
         buffer.putInt(seqNum);      // 4 byte
         buffer.putInt(ackNum);      // 4 byte
         buffer.put(flags);          // 1 byte
+        buffer.putShort((short) window);
         buffer.putInt(checksum);    // 4 byte
         buffer.put(payload);        // phần dữ liệu thật, dài bao nhiêu tùy payload
         return buffer.array();
@@ -117,6 +129,7 @@ public class Packet {
         int seqNum = buffer.getInt();     // đọc 4 byte đầu
         int ackNum = buffer.getInt();     // đọc 4 byte tiếp theo
         byte flags = buffer.get();        // đọc 1 byte
+        int window = Short.toUnsignedInt(buffer.getShort());
         int checksum = buffer.getInt();   // đọc 4 byte tiếp theo
 
         // Phần còn lại (từ vị trí hiện tại tới hết "length") là payload
@@ -124,11 +137,11 @@ public class Packet {
         byte[] payload = new byte[payloadLength];
         buffer.get(payload);
 
-        Packet packet = new Packet(seqNum, ackNum, flags, payload);
+        Packet packet = new Packet(seqNum, ackNum, flags, window, payload);
         // Ghi đè checksum bằng giá trị ĐỌC ĐƯỢC (không tính lại),
         // rồi so sánh với checksum tính từ payload thật để kiểm tra lỗi.
         packet.checksum = checksum;
-        packet.checksumValid = (calculateChecksum(seqNum, ackNum, flags, payload) == checksum);
+        packet.checksumValid = (calculateChecksum(seqNum, ackNum, flags, window, payload) == checksum);
         return packet;
     }
 
@@ -152,9 +165,9 @@ public class Packet {
     @Override
     public String toString() {
         return String.format(
-            "loai=%s | seq=%d | ack=%d | payload=%s | checksum hop le=%b",
+            "loai=%s | seq=%d | ack=%d | window=%d | payload=%s | checksum hop le=%b",
             flagsToString(), seqNum, ackNum,
-            new String(payload), checksumValid
+            window, new String(payload), checksumValid
         );
     }
 

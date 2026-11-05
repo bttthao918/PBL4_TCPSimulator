@@ -86,6 +86,10 @@ public class Client {
     static volatile boolean serverFinReceived = false;
     static volatile int serverFinSeq = -1;
     static volatile String resetReason = null;
+    static volatile int remoteWindow = 65535;
+    static volatile long sessionStartMs = 0;
+    static volatile long lastWindowProbeMs = 0;
+    static final long ZERO_WINDOW_PROBE_INTERVAL_MS = 1000;
 
     // ---------------- BUOC 4 + 5: thong ke va quan ly nhieu phien ----------------
     static final AtomicInteger statFirstSends = new AtomicInteger();   // so segment du lieu gui lan dau
@@ -246,6 +250,10 @@ public class Client {
         return congestion.window(windowSize);
     }
 
+    static int flowControlledWindow() {
+        return Math.min(currentWindow(), remoteWindow / SEGMENT_SIZE);
+    }
+
     /** Thong tin 1 segment dang cho ACK: du lieu, co, thoi diem gui gan nhat, so lan da thu lai. */
     static class SegmentInfo {
         byte[] payload;
@@ -357,6 +365,8 @@ public class Client {
         serverFinReceived = false;
         serverFinSeq = -1;
         resetReason = null;
+        remoteWindow = 65535;
+        lastWindowProbeMs = 0;
         serverReport = null;
         statFirstSends.set(0);
         statRetransmits.set(0);
@@ -379,6 +389,7 @@ public class Client {
         log("Dia chi Server se ket noi toi: " + s.serverIp + ":" + SERVER_PORT);
 
         long sessionStart = System.currentTimeMillis();
+        sessionStartMs = sessionStart;
         rtoEstimator.reset(sessionStart);
         clientSocket = new DatagramSocket();
         serverAddress = resolveServerAddress(s.serverIp);
@@ -398,6 +409,8 @@ public class Client {
             log("Da gui SYN (lan " + attempt + "), seq=" + clientIsn);
             try {
                 Packet response = receiveRaw();
+                remoteWindow = response.window;
+                EventBus.publishRwnd(System.currentTimeMillis() - sessionStartMs, remoteWindow);
                 if (Packet.hasFlag(response.flags, Packet.FLAG_RST)) {
                     report.failReason = response.payload.length == 0
                             ? "Server tu choi ket noi (RST)"
@@ -596,7 +609,7 @@ public class Client {
         String label = (flags == Packet.FLAG_FIN) ? "FIN" : ("segment #" + segmentIndex);
         log("Gui " + label + " (seq=" + seq + ")"
                 + (payload.length > 0 ? ": \"" + new String(payload) + "\"" : "")
-                + " | dang bay=" + inflight + "/" + currentWindow());
+                + " | dang bay=" + inflight + "/cwnd=" + currentWindow() + ", rwnd=" + remoteWindow);
     }
 
     /** BUOC 1: main thread dung o day cho toi khi cua so con cho trong (hoac truyen that bai). */
@@ -606,8 +619,15 @@ public class Client {
             synchronized (unackedSegments) {
                 inflight = unackedSegments.size();
             }
-            if (inflight < currentWindow()) {
+            if (inflight < flowControlledWindow()) {
                 return;
+            }
+            if (remoteWindow < SEGMENT_SIZE) {
+                long now = System.currentTimeMillis();
+                if (now - lastWindowProbeMs >= ZERO_WINDOW_PROBE_INTERVAL_MS) {
+                    sendWindowProbe();
+                    lastWindowProbeMs = now;
+                }
             }
             Thread.sleep(5);
         }
@@ -647,6 +667,8 @@ public class Client {
         while (sessionGen == gen) {
             try {
                 Packet response = receiveRaw();
+                remoteWindow = response.window;
+                EventBus.publishRwnd(System.currentTimeMillis() - sessionStartMs, remoteWindow);
                 if (Packet.hasFlag(response.flags, Packet.FLAG_RST)) {
                     String reason = response.payload.length == 0 ? "Server tu choi: chua co phien" :
                             new String(response.payload, StandardCharsets.UTF_8);
@@ -787,7 +809,7 @@ public class Client {
     /** Gui lai 1 segment (dung chung cho timeout va fast retransmit). Phai giu khoa unackedSegments. */
     static void retransmit(int seq, SegmentInfo info, long now, String reason) {
         try {
-            Packet resend = new Packet(seq, 0, info.flags, info.payload);
+            Packet resend = new Packet(seq, 0, info.flags, 65535, info.payload);
             // Goi truc tiep NetworkSimulator.send (khong qua sendRaw) de
             // bao dung trang thai RETRANSMITTED thay vi SENT cho GUI.
             NetworkSimulator.send(clientSocket, resend, serverAddress, SERVER_PORT,
@@ -821,6 +843,15 @@ public class Client {
     static void sendRaw(Packet packet) throws Exception {
         NetworkSimulator.send(clientSocket, packet, serverAddress, SERVER_PORT,
                 "Client -> Server", PacketEvent.Status.SENT);
+    }
+
+    static void sendWindowProbe() {
+        try {
+            sendRaw(new Packet(0, 0, Packet.FLAG_ACK, 65535, new byte[0]));
+            log("rwnd=0 -> gui zero-window probe");
+        } catch (Exception e) {
+            log("Loi gui zero-window probe: " + e.getMessage());
+        }
     }
 
     static Packet receiveRaw() throws Exception {

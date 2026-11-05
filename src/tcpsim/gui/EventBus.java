@@ -45,6 +45,20 @@ public class EventBus {
     // Moi mau la double[]{thoi_gian_ms, SRTT_ms, RTO_ms}.
     private static final ConcurrentLinkedQueue<double[]> rtoQueue = new ConcurrentLinkedQueue<>();
 
+    // Samples are double[]{time_ms, rwnd_bytes} for the flow-control graph.
+    private static final ConcurrentLinkedQueue<double[]> rwndQueue = new ConcurrentLinkedQueue<>();
+
+    public static void publishRwnd(double timeMs, int rwndBytes) {
+        rwndQueue.add(new double[]{timeMs, rwndBytes});
+    }
+
+    public static List<double[]> drainRwnd() {
+        List<double[]> result = new ArrayList<>();
+        double[] sample;
+        while ((sample = rwndQueue.poll()) != null) result.add(sample);
+        return result;
+    }
+
     public static void publishRto(double timeMs, double srttMs, double rtoMs) {
         rtoQueue.add(new double[]{timeMs, srttMs, rtoMs});
     }
@@ -73,6 +87,7 @@ public class EventBus {
         drainAll();
         drainCwnd();
         drainRto();
+        drainRwnd();
         reportQueue.clear();
     }
 

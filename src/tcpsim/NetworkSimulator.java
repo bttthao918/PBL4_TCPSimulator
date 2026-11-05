@@ -122,7 +122,7 @@ public class NetworkSimulator {
                     + " -> goi tin bi mat tren duong truyen (mo phong).");
             EventBus.publish(new PacketEvent(
                 PacketEvent.Status.LOST, direction, packet.flagsToString(),
-                packet.seqNum, packet.ackNum, "Mo phong mang - " + note,
+                packet.seqNum, packet.ackNum, packet.window, "Mo phong mang - " + note,
                 statusIfSent == PacketEvent.Status.RETRANSMITTED
             ));
             return false;
@@ -150,7 +150,7 @@ public class NetworkSimulator {
         // dang "tren duong" (dang tre) thi vi tri ve tren so do van hop ly.
         PacketEvent.Status eventStatus = corrupted ? PacketEvent.Status.CORRUPTED : statusIfSent;
         EventBus.publish(new PacketEvent(eventStatus, direction, packet.flagsToString(),
-                packet.seqNum, packet.ackNum, note,
+                packet.seqNum, packet.ackNum, packet.window, note,
                 statusIfSent == PacketEvent.Status.RETRANSMITTED));
 
         if (delay == 0) {

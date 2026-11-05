@@ -28,6 +28,7 @@ public class ServerMultiClientTest {
 
     public static void main(String[] args) throws Exception {
         testChecksumRejectsHeaderAndPayloadCorruption();
+        testReceiveWindowAndProbe();
         NetworkSimulator.configure(0, 0, 0, 0);
         AtomicReference<Throwable> serverFailure = new AtomicReference<>();
         try (DatagramSocket server = new DatagramSocket(0, InetAddress.getLoopbackAddress())) {
@@ -83,7 +84,9 @@ public class ServerMultiClientTest {
     }
 
     private static void testChecksumRejectsHeaderAndPayloadCorruption() {
-        Packet original = new Packet(1234, 5678, Packet.FLAG_ACK, new byte[]{10, 20, 30});
+        Packet original = new Packet(1234, 5678, Packet.FLAG_ACK, 321, new byte[]{10, 20, 30});
+        Packet roundTrip = Packet.decode(original.encode(), original.encode().length);
+        check(roundTrip.window == 321, "Receive window must survive encode/decode");
         byte[] headerCorrupted = original.encode();
         headerCorrupted[0] ^= 0x01; // seq_num
         check(!Packet.decode(headerCorrupted, headerCorrupted.length).checksumValid,
@@ -94,8 +97,55 @@ public class ServerMultiClientTest {
         check(!Packet.decode(payloadCorrupted, payloadCorrupted.length).checksumValid,
                 "Payload corruption must fail checksum");
 
+        byte[] windowCorrupted = original.encode();
+        windowCorrupted[9] ^= 0x01; // window field starts after seq(4)+ack(4)+flags(1)
+        check(!Packet.decode(windowCorrupted, windowCorrupted.length).checksumValid,
+                "Window corruption must fail checksum");
+
         check(Packet.decode(original.encode(), original.encode().length).checksumValid,
                 "Unmodified packet must pass checksum");
+    }
+
+    private static void testReceiveWindowAndProbe() throws Exception {
+        int oldBuffer = Server.RECEIVE_BUFFER_BYTES;
+        int oldReadBytes = Server.APP_READ_BYTES;
+        int oldReadInterval = Server.APP_READ_INTERVAL_MS;
+        Server.RECEIVE_BUFFER_BYTES = 8;
+        Server.APP_READ_BYTES = 1;
+        Server.APP_READ_INTERVAL_MS = 100000;
+        try (DatagramSocket server = new DatagramSocket(0, InetAddress.getLoopbackAddress());
+             Peer peer = new Peer(server.getLocalPort())) {
+            Thread serverThread = new Thread(() -> {
+                try {
+                    Server.serve(server);
+                } catch (Exception ignored) {
+                    // Socket closure ends the test server.
+                }
+            }, "FlowControlTestServer");
+            serverThread.setDaemon(true);
+            serverThread.start();
+            peer.open(true);
+            peer.send(new Packet(START_SEQ, 0, (byte) 0, 65535, new byte[8]));
+            Packet fullAck = peer.receive();
+            check(fullAck.window == 0, "Server must advertise zero rwnd when buffer is full");
+
+            peer.send(new Packet(START_SEQ + 8, 0, (byte) 0, 65535, new byte[8]));
+            Packet blockedAck = peer.receive();
+            check(blockedAck.ackNum == START_SEQ + 8 && blockedAck.window == 0,
+                    "Server must hold data and keep rwnd=0 while full");
+
+            Server.APP_READ_BYTES = 8;
+            Server.APP_READ_INTERVAL_MS = 1;
+            peer.send(new Packet(0, 0, Packet.FLAG_ACK, 65535, EMPTY));
+            Packet reopenedAck = peer.receive();
+            check(reopenedAck.window > 0, "Zero-window probe must observe reopened rwnd");
+            server.close();
+            serverThread.join(1000);
+        } finally {
+            Server.RECEIVE_BUFFER_BYTES = oldBuffer;
+            Server.APP_READ_BYTES = oldReadBytes;
+            Server.APP_READ_INTERVAL_MS = oldReadInterval;
+        }
     }
 
     private static void testInterleavedSessions(int port) throws Exception {
