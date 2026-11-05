@@ -21,6 +21,7 @@ public class SessionReport {
     public int lostPackets = 0;          // so goi bi mat do mo phong tren Client
     public int corruptedPackets = 0;     // so goi bi lat bit do mo phong tren Client
     public int cwndReductions = 0;       // so lan cwnd bi giam do timeout
+    public int timeouts = 0;             // so lan TimeoutThread phat hien timeout
     public double maxCwnd = 0;           // cwnd lon nhat dat duoc
     public boolean ccEnabled = true;     // dieu khien tac nghen co bat khong
     public double finalSrttMs = 0;

@@ -83,6 +83,7 @@ public class Client {
     static final AtomicInteger statFirstSends = new AtomicInteger();   // so segment du lieu gui lan dau
     static final AtomicInteger statRetransmits = new AtomicInteger();  // so luot gui lai segment du lieu
     static final AtomicInteger statFastRetransmits = new AtomicInteger(); // so lan gui lai nhanh (3 ACK trung lap)
+    static final AtomicInteger statTimeouts = new AtomicInteger();       // so lan timeout
     // BUOC 6 (fast retransmit): dem so ACK TRUNG LAP lien tiep. Server cu moi goi den (ke ca goi
     // sai thu tu) deu tra ve ACK "toi dang cho seq=X" -> gap 3 ACK cung X nghia la goi X da mat
     // nhung cac goi sau no van den noi. Khong can cho het RTO hien tai, gui lai X ngay.
@@ -312,6 +313,7 @@ public class Client {
             report.segments = statFirstSends.get();
             report.retransmissions = statRetransmits.get();
             report.fastRetransmits = statFastRetransmits.get();
+            report.timeouts = statTimeouts.get();
             report.dataTransmissions = report.segments + report.retransmissions;
             report.lostPackets = NetworkSimulator.lostCount.get();
             report.corruptedPackets = NetworkSimulator.corruptedCount.get();
@@ -333,6 +335,7 @@ public class Client {
         statFirstSends.set(0);
         statRetransmits.set(0);
         statFastRetransmits.set(0);
+        statTimeouts.set(0);
 
         windowSize = Math.max(1, s.windowSize);
         congestion = new CongestionControl(s.congestionControl, s.ssthresh);
@@ -671,6 +674,7 @@ public class Client {
                     SegmentInfo info = unackedSegments.get(seq);
                     long currentRto = rtoEstimator.getRtoMs();
                     if (now - info.sentTime >= currentRto) {
+                        statTimeouts.incrementAndGet();
                         rtoEstimator.onTimeout();
                         congestion.onTimeout(now); // giam cwnd ve 1 (tu gioi han: chi 1 lan moi dot mat goi)
                         if (info.retryCount >= MAX_DATA_RETRIES) {
