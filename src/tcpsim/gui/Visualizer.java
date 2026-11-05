@@ -54,6 +54,7 @@ public class Visualizer {
     private final JSpinner windowSpinner;
     private final JSpinner ssthreshSpinner;
     private final JSpinner sizeSpinner;
+    private final JSpinner timeWaitSpinner;
     private final JCheckBox ccCheck;
     private final JButton runButton;
 
@@ -76,6 +77,7 @@ public class Visualizer {
     private int corruptCount = 0;
     private int ackCount = 0;
     private double[] lastSample = null;
+    private String connectionState = "CLOSED";
 
     private Visualizer(SessionSettings initial, SessionRunner runner) {
         this.runner = runner;
@@ -96,6 +98,7 @@ public class Visualizer {
         windowSpinner = spinner("windowSpinner", initial.windowSize, 1, 64, 1);
         ssthreshSpinner = spinner("ssthreshSpinner", initial.ssthresh, 2, 64, 1);
         sizeSpinner = spinner("sizeSpinner", initial.messageRepeat, 1, 100, 1);
+        timeWaitSpinner = spinner("timeWaitSpinner", initial.timeWaitMs, 0, 30000, 100);
         ccCheck = new JCheckBox("Bat dieu khien tac nghen", initial.congestionControl);
         ccCheck.setName("ccCheck");
         ccCheck.setOpaque(false);
@@ -126,6 +129,7 @@ public class Visualizer {
         addFormRow(form, r++, "Cua so toi da", windowSpinner);
         addFormRow(form, r++, "ssthresh", ssthreshSpinner);
         addFormRow(form, r++, "Du lieu (x47 byte)", sizeSpinner);
+        addFormRow(form, r++, "TIME_WAIT (ms)", timeWaitSpinner);
         left(form);
         side.add(form);
         side.add(Box.createVerticalStrut(4));
@@ -392,6 +396,7 @@ public class Visualizer {
         s.windowSize = intValue(windowSpinner);
         s.ssthresh = intValue(ssthreshSpinner);
         s.messageRepeat = intValue(sizeSpinner);
+        s.timeWaitMs = intValue(timeWaitSpinner);
         s.congestionControl = ccCheck.isSelected();
         return s;
     }
@@ -429,6 +434,7 @@ public class Visualizer {
         sentCount = retransCount = lostCount = ackCount = 0;
         corruptCount = 0;
         lastSample = null;
+        connectionState = "CLOSED";
         updateStatusBar();
         diagramPanel.repaint();
         chartPanel.repaint();
@@ -454,6 +460,11 @@ public class Visualizer {
         boolean followDiagram = diagramIsAtBottom();
 
         for (PacketEvent event : newEvents) {
+            if ("STATE".equals(event.packetType) && event.note != null
+                    && event.direction.startsWith("Client")) {
+                int arrow = event.note.lastIndexOf(" -> ");
+                connectionState = arrow >= 0 ? event.note.substring(arrow + 4) : event.note;
+            }
             diagramPanel.addEvent(event);
             countEvent(event);
             tableModel.insertRow(0, new Object[]{
@@ -517,21 +528,26 @@ public class Visualizer {
     }
 
     private void updateStatusBar() {
+        phaseBadge.setText("STATE: " + connectionState);
+        phaseBadge.setBackground(stateColor(connectionState));
         if (lastSample == null) {
-            phaseBadge.setText("CHUA CO DU LIEU");
-            phaseBadge.setBackground(GRAY);
             cwndLabel.setText("");
             ssthreshLabel.setText("");
         } else {
             int type = (int) lastSample[3];
-            phaseBadge.setText(phaseName(type));
-            phaseBadge.setBackground(type == 0 ? BLUE : type == 1 ? GREEN : type == 3 ? ORANGE : RED);
-            cwndLabel.setText(String.format("<html>cwnd <b>%.2f</b></html>", lastSample[1]));
+            cwndLabel.setText(String.format("<html>cwnd <b>%.2f</b> (%s)</html>", lastSample[1], phaseName(type)));
             ssthreshLabel.setText(String.format("<html>ssthresh <b>%.0f</b></html>", lastSample[2]));
         }
         countersLabel.setText("Da gui " + sentCount + "     Gui lai " + retransCount
                 + "     Mat goi " + lostCount + "     Hong " + corruptCount
                 + "     ACK nhan " + ackCount);
+    }
+
+    private static Color stateColor(String state) {
+        if ("ESTABLISHED".equals(state)) return GREEN;
+        if (state.startsWith("FIN_WAIT") || "TIME_WAIT".equals(state)) return ORANGE;
+        if ("SYN_SENT".equals(state)) return BLUE;
+        return GRAY;
     }
 
     // =====================================================================

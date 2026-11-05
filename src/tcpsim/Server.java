@@ -34,7 +34,7 @@ public class Server {
     static final int SESSION_CLEANUP_INTERVAL_MS = 1000;
     static final long SESSION_IDLE_TIMEOUT_NS = TimeUnit.MINUTES.toNanos(2);
 
-    private enum ConnectionState { SYN_RECEIVED, ESTABLISHED, CLOSED }
+    enum ConnectionState { SYN_RECEIVED, ESTABLISHED, CLOSE_WAIT, LAST_ACK, CLOSED }
 
     /** Tuyet doi khong chia se trang thai/buffer giua hai dia chi Client. */
     private static class ClientSession {
@@ -47,6 +47,9 @@ public class Server {
         ByteArrayOutputStream receivedData = new ByteArrayOutputStream();
         byte[] lastFinAckPayload = new byte[0];
         int lastFinSeq = -1;
+        int serverFinSeq = -1;
+        int finRetryCount = 0;
+        long finSentAtMs = 0;
         long lastActivityNs = System.nanoTime();
 
         ClientSession(InetSocketAddress address, int clientIsn) {
@@ -139,6 +142,17 @@ public class Server {
                 });
                 lastCleanupNs = now;
             }
+            for (ClientSession session : sessions.values()) {
+                if (session.state == ConnectionState.LAST_ACK
+                        && System.currentTimeMillis() - session.finSentAtMs >= 1000) {
+                    if (session.finRetryCount++ >= 8) {
+                        session.log("FIN cua Server qua nhieu lan khong duoc ACK -> CLOSED.");
+                        changeState(session, ConnectionState.CLOSED);
+                    } else {
+                        sendFin(serverSocket, session, PacketEvent.Status.RETRANSMITTED);
+                    }
+                }
+            }
 
             DatagramPacket datagram = new DatagramPacket(receiveBuffer, receiveBuffer.length);
             try {
@@ -175,7 +189,10 @@ public class Server {
                 continue;
             }
             if (session == null) {
-                log("[Client " + clientAddress + "] Chua co phien, can gui SYN truoc.");
+                log("[Client " + clientAddress + "] Chua co phien -> gui RST.");
+                sendStateless(serverSocket, clientAddress,
+                        new Packet(0, packet.seqNum + packet.payload.length,
+                                (byte) (Packet.FLAG_RST | Packet.FLAG_ACK), new byte[0]));
                 continue;
             }
             session.lastActivityNs = System.nanoTime();
@@ -232,6 +249,10 @@ public class Server {
         }
 
         if (packet.flags == Packet.FLAG_FIN) {
+            if (session.state == ConnectionState.LAST_ACK || session.state == ConnectionState.CLOSE_WAIT) {
+                sendFinAck(socket, session, PacketEvent.Status.RETRANSMITTED);
+                return;
+            }
             if (packet.seqNum != session.expectedDataSeq || !session.outOfOrderBuffer.isEmpty()) {
                 session.log("Chua du du lieu, tiep tuc cho seq=" + session.expectedDataSeq);
                 sendDataAck(socket, session);
@@ -243,16 +264,26 @@ public class Server {
             String report = "len=" + assembled.length + ";crc=" + Long.toHexString(crc.getValue());
             session.lastFinAckPayload = report.getBytes(StandardCharsets.UTF_8);
             session.lastFinSeq = packet.seqNum;
-            session.state = ConnectionState.CLOSED;
             session.log("=== DU LIEU DA RAP DUOC (" + assembled.length + " byte) ===");
             session.log("\"" + new String(assembled, StandardCharsets.UTF_8) + "\"");
             session.log("Bao cao gui kem ACK cua FIN: " + report);
+            changeState(session, ConnectionState.CLOSE_WAIT);
             send(socket, session, new Packet(0, packet.seqNum + 1, Packet.FLAG_ACK,
                     session.lastFinAckPayload), PacketEvent.Status.SENT);
+            // ACK FIN xong, server cung phai dong huong cua minh.
+            session.serverFinSeq = session.serverIsn + 1;
+            changeState(session, ConnectionState.LAST_ACK);
+            sendFin(socket, session, PacketEvent.Status.SENT);
             // Chi giu bao cao de ACK lai FIN; giai phong du lieu cua phien da dong.
             session.receivedData = new ByteArrayOutputStream();
             session.outOfOrderBuffer.clear();
-            session.log("Phien ket thuc -> CLOSED. Cac Client khac van tiep tuc.");
+            return;
+        }
+
+        if (session.state == ConnectionState.LAST_ACK && packet.flags == Packet.FLAG_ACK
+                && packet.ackNum == session.serverFinSeq + 1) {
+            changeState(session, ConnectionState.CLOSED);
+            session.log("Nhan ACK FIN cua Server -> CLOSED.");
             return;
         }
 
@@ -290,9 +321,39 @@ public class Server {
         session.log("Da gui ACK, ack=" + session.expectedDataSeq);
     }
 
+    private static void sendFin(DatagramSocket socket, ClientSession session, PacketEvent.Status status) {
+        session.finSentAtMs = System.currentTimeMillis();
+        send(socket, session, new Packet(session.serverFinSeq, session.lastFinSeq + 1,
+                Packet.FLAG_FIN, new byte[0]), status);
+        session.log("Da gui FIN cua Server (seq=" + session.serverFinSeq + ").");
+    }
+
+    private static void sendFinAck(DatagramSocket socket, ClientSession session, PacketEvent.Status status) {
+        send(socket, session, new Packet(0, session.lastFinSeq + 1, Packet.FLAG_ACK,
+                session.lastFinAckPayload), status);
+        if (session.state == ConnectionState.CLOSE_WAIT) {
+            changeState(session, ConnectionState.LAST_ACK);
+        }
+        sendFin(socket, session, status);
+    }
+
+    private static void sendStateless(DatagramSocket socket, InetSocketAddress address, Packet packet) {
+        NetworkSimulator.send(socket, packet, address.getAddress(), address.getPort(),
+                "Server -> Client " + address, PacketEvent.Status.SENT);
+    }
+
     private static void send(DatagramSocket socket, ClientSession session, Packet packet,
                              PacketEvent.Status status) {
         NetworkSimulator.send(socket, packet, session.address.getAddress(), session.address.getPort(),
                 "Server -> Client " + session.address, status);
+    }
+
+    private static void changeState(ClientSession session, ConnectionState next) {
+        if (session.state == next) return;
+        ConnectionState previous = session.state;
+        session.state = next;
+        session.log("STATE " + previous + " -> " + next);
+        tcpsim.gui.EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Server",
+                "STATE", 0, 0, previous + " -> " + next));
     }
 }

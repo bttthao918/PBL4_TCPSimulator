@@ -36,6 +36,14 @@ public final class ExperimentRunner {
         Path csv = Paths.get(args.length > 2 ? args[2] : "test-results/ket_qua.csv");
         int sessionTimeoutSeconds = args.length > 3
                 ? Integer.parseInt(args[3]) : DEFAULT_SESSION_TIMEOUT_SECONDS;
+        // Optional filters keep the original 90-run CLI intact while allowing
+        // a quick smoke run: <loss> <window> <trials> <cc:on|off>.
+        int[] lossRates = args.length > 4 ? new int[]{Integer.parseInt(args[4])} : LOSS_RATES;
+        int[] windows = args.length > 5 ? new int[]{Integer.parseInt(args[5])} : WINDOWS;
+        int trials = args.length > 6 ? Integer.parseInt(args[6]) : TRIALS;
+        boolean[] ccModes = args.length > 7
+                ? new boolean[]{!args[7].equalsIgnoreCase("off")}
+                : new boolean[]{true, false};
         Path parent = csv.getParent();
         if (parent != null) Files.createDirectories(parent);
 
@@ -44,12 +52,12 @@ public final class ExperimentRunner {
             out.newLine();
             out.flush();
             int completed = 0;
-            int totalRuns = LOSS_RATES.length * WINDOWS.length * 2 * TRIALS;
-            for (int loss : LOSS_RATES) {
-                for (int window : WINDOWS) {
-                    for (boolean cc : new boolean[]{true, false}) {
+            int totalRuns = lossRates.length * windows.length * ccModes.length * trials;
+            for (int loss : lossRates) {
+                for (int window : windows) {
+                    for (boolean cc : ccModes) {
                         List<SessionReport> reports = new ArrayList<>();
-                        for (int trial = 1; trial <= TRIALS; trial++) {
+                        for (int trial = 1; trial <= trials; trial++) {
                             System.out.printf("[%d/%d] Bat dau loss=%d window=%d cc=%s trial=%d%n",
                                     completed + 1, totalRuns, loss, window, cc, trial);
                             System.out.flush();

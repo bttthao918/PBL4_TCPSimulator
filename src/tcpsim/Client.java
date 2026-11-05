@@ -47,12 +47,15 @@ import tcpsim.gui.Visualizer;
  */
 public class Client {
 
+    public enum ConnectionState { CLOSED, SYN_SENT, ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2, TIME_WAIT }
+
     static final int SERVER_PORT = 5005;
     static final String AUTO_SERVER = "auto";
     static final byte[] DISCOVERY_REQUEST = "PBL4_DISCOVER_V1".getBytes(StandardCharsets.US_ASCII);
     static final byte[] DISCOVERY_RESPONSE = "PBL4_SERVER_V1".getBytes(StandardCharsets.US_ASCII);
     static final int HANDSHAKE_TIMEOUT_MS = 2000;
     static final int MAX_HANDSHAKE_RETRIES = 5;
+    static final int DEFAULT_TIME_WAIT_MS = 2000;
 
     static final int SEGMENT_SIZE = 8;
     // Cau mau 47 byte. Moi phien lap lai no 'message_repeat' lan (chinh duoc tren GUI)
@@ -78,6 +81,11 @@ public class Client {
     // volatile: dam bao moi thread deu thay gia tri MOI NHAT ngay lap tuc,
     // khong bi "cache" rieng gia tri cu trong tung thread.
     static volatile boolean transferFailed = false;
+    static volatile ConnectionState connectionState = ConnectionState.CLOSED;
+    static volatile int timeWaitMs = DEFAULT_TIME_WAIT_MS;
+    static volatile boolean serverFinReceived = false;
+    static volatile int serverFinSeq = -1;
+    static volatile String resetReason = null;
 
     // ---------------- BUOC 4 + 5: thong ke va quan ly nhieu phien ----------------
     static final AtomicInteger statFirstSends = new AtomicInteger();   // so segment du lieu gui lan dau
@@ -102,6 +110,18 @@ public class Client {
     static void log(String message) {
         System.out.println("[" + LocalTime.now().format(TIME_FORMAT) + "] "
                 + "[" + Thread.currentThread().getName() + "] " + message);
+    }
+
+    static ConnectionState getConnectionState() { return connectionState; }
+
+    static void changeState(ConnectionState next) {
+        ConnectionState previous = connectionState;
+        if (previous == next) return;
+        connectionState = next;
+        String message = "STATE " + previous + " -> " + next;
+        log(message);
+        EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Client", "STATE",
+                0, 0, message));
     }
 
     /**
@@ -262,6 +282,8 @@ public class Client {
         initial.congestionControl = !config.getOrDefault("congestion_control", "on").equalsIgnoreCase("off");
         initial.ssthresh = (int) Math.round(Double.parseDouble(config.getOrDefault("ssthresh", "16")));
         initial.messageRepeat = Math.max(1, Integer.parseInt(config.getOrDefault("message_repeat", "8")));
+        initial.timeWaitMs = Math.max(0, Integer.parseInt(config.getOrDefault("time_wait_ms",
+                String.valueOf(DEFAULT_TIME_WAIT_MS))));
 
         // Tham so dong lenh (neu co) GHI DE len file cau hinh - tien khi tu test nhanh.
         if (args.length >= 3) {
@@ -331,6 +353,10 @@ public class Client {
             unackedSegments.clear();
         }
         transferFailed = false;
+        changeState(ConnectionState.CLOSED);
+        serverFinReceived = false;
+        serverFinSeq = -1;
+        resetReason = null;
         serverReport = null;
         statFirstSends.set(0);
         statRetransmits.set(0);
@@ -338,6 +364,7 @@ public class Client {
         statTimeouts.set(0);
 
         windowSize = Math.max(1, s.windowSize);
+        timeWaitMs = Math.max(0, s.timeWaitMs);
         congestion = new CongestionControl(s.congestionControl, s.ssthresh);
         int minDelay = Math.max(0, s.delayMinMs);
         int maxDelay = Math.max(minDelay, s.delayMaxMs);
@@ -358,6 +385,7 @@ public class Client {
 
         int clientIsn = random.nextInt(1000, 9999);
         log("Client san sang, ISN = " + clientIsn);
+        changeState(ConnectionState.SYN_SENT);
 
         // ================= BAT TAY 3 BUOC =================
         clientSocket.setSoTimeout(HANDSHAKE_TIMEOUT_MS);
@@ -370,6 +398,15 @@ public class Client {
             log("Da gui SYN (lan " + attempt + "), seq=" + clientIsn);
             try {
                 Packet response = receiveRaw();
+                if (Packet.hasFlag(response.flags, Packet.FLAG_RST)) {
+                    report.failReason = response.payload.length == 0
+                            ? "Server tu choi ket noi (RST)"
+                            : new String(response.payload, StandardCharsets.UTF_8);
+                    resetReason = report.failReason;
+                    transferFailed = true;
+                    changeState(ConnectionState.CLOSED);
+                    return;
+                }
                 if (Packet.hasFlag(response.flags, Packet.FLAG_SYN)
                         && Packet.hasFlag(response.flags, Packet.FLAG_ACK)
                         && response.ackNum == clientIsn + 1) {
@@ -392,6 +429,7 @@ public class Client {
         int currentSeq = clientIsn + 1;
         Packet finalAck = new Packet(currentSeq, serverIsn + 1, Packet.FLAG_ACK, new byte[0]);
         sendRaw(finalAck);
+        changeState(ConnectionState.ESTABLISHED);
         log("Da gui ACK cuoi cung -> ESTABLISHED. Bat tay hoan tat!\n");
         long handshakeDone = System.currentTimeMillis();
         report.handshakeMs = handshakeDone - sessionStart;
@@ -440,22 +478,36 @@ public class Client {
 
         if (transferFailed) {
             log("\nLOI: Truyen du lieu that bai sau nhieu lan gui lai khong thanh cong.");
-            report.failReason = "Mot segment gui lai qua " + MAX_DATA_RETRIES + " lan van khong duoc ACK";
+            report.failReason = resetReason != null ? resetReason
+                    : "Mot segment gui lai qua " + MAX_DATA_RETRIES + " lan van khong duoc ACK";
             report.transferMs = System.currentTimeMillis() - handshakeDone;
             return;
         }
 
         // ================= GUI FIN =================
         log("\nDa gui het " + (segmentIndex - 1) + " segment. Gui goi FIN de bao ket thuc.");
+        changeState(ConnectionState.FIN_WAIT_1);
         sendDataSegment(currentSeq, new byte[0], Packet.FLAG_FIN, -1);
         waitUntilAcked(currentSeq);
         report.transferMs = System.currentTimeMillis() - handshakeDone;
 
         if (transferFailed) {
-            report.failReason = "Gui FIN that bai (khong nhan duoc ACK cua FIN)";
+            report.failReason = resetReason != null ? resetReason
+                    : "Gui FIN that bai (khong nhan duoc ACK cua FIN)";
             return;
         }
-        log("Server da xac nhan FIN. Phien truyen du lieu ket thuc thanh cong!");
+        if (!serverFinReceived) changeState(ConnectionState.FIN_WAIT_2);
+        long waitDeadline = System.currentTimeMillis() + Math.max(0, timeWaitMs + 10000L);
+        while (!serverFinReceived && !transferFailed && System.currentTimeMillis() < waitDeadline) {
+            Thread.sleep(20);
+        }
+        if (!serverFinReceived) {
+            report.failReason = resetReason != null ? resetReason : "Khong nhan duoc FIN cua Server";
+            return;
+        }
+        log("Server da xac nhan FIN. Gui ACK cuoi va vao TIME_WAIT " + timeWaitMs + " ms.");
+        Thread.sleep(Math.max(0, timeWaitMs));
+        changeState(ConnectionState.CLOSED);
 
         // ================= BUOC 4: KIEM TRA DU LIEU DEN NOI CO DUNG KHONG =================
         // Server gui kem trong ACK cua FIN: "len=<so byte>;crc=<CRC32>" cua du lieu no rap duoc.
@@ -595,6 +647,26 @@ public class Client {
         while (sessionGen == gen) {
             try {
                 Packet response = receiveRaw();
+                if (Packet.hasFlag(response.flags, Packet.FLAG_RST)) {
+                    String reason = response.payload.length == 0 ? "Server tu choi: chua co phien" :
+                            new String(response.payload, StandardCharsets.UTF_8);
+                    log("Nhan RST tu Server: " + reason);
+                    reportReset(reason);
+                    continue;
+                }
+                if (Packet.hasFlag(response.flags, Packet.FLAG_FIN)) {
+                    serverFinSeq = response.seqNum;
+                    serverFinReceived = true;
+                    if (connectionState == ConnectionState.FIN_WAIT_2
+                            || connectionState == ConnectionState.FIN_WAIT_1) {
+                        changeState(ConnectionState.TIME_WAIT);
+                    }
+                    sendRaw(new Packet(0, response.seqNum + 1, Packet.FLAG_ACK, new byte[0]));
+                    log("Nhan FIN cua Server -> gui ACK cuoi (ack=" + (response.seqNum + 1) + ").");
+                    EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Server -> Client",
+                            "FIN", response.seqNum, response.ackNum, "FIN cua Server"));
+                    continue;
+                }
                 if (Packet.hasFlag(response.flags, Packet.FLAG_ACK)) {
                     int ackNum = response.ackNum;
                     // BUOC 4: ACK cua FIN co kem bao cao cua Server -> luu lai de doi chieu cuoi phien.
@@ -626,6 +698,12 @@ public class Client {
                     } else if (ackedSegments.size() == 1) {
                         log("Bo mau RTT: goi da gui lai");
                     }
+                    for (SegmentInfo info : ackedSegments) {
+                        if (info.flags == Packet.FLAG_FIN && connectionState == ConnectionState.FIN_WAIT_1) {
+                            changeState(ConnectionState.FIN_WAIT_2);
+                            log("ACK FIN cua Client da den -> FIN_WAIT_2.");
+                        }
+                    }
                     if (ackedData > 0) {
                         congestion.onAcked(ackedData, windowSize);
                     }
@@ -651,6 +729,13 @@ public class Client {
                 return; // socket dong (ket thuc chuong trinh) -> thoat thread trong yen lang
             }
         }
+    }
+
+    private static void reportReset(String reason) {
+        transferFailed = true;
+        changeState(ConnectionState.CLOSED);
+        EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Server -> Client",
+                "RST", 0, 0, reason));
     }
 
     /** TimeoutThread: viec DUY NHAT no lam la ra soat dinh ky va gui lai khi qua han. */

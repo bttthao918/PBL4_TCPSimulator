@@ -17,4 +17,5 @@ public class SessionSettings {
     public boolean congestionControl = true;
     public int ssthresh = 16;            // nguong ssthresh ban dau (segment)
     public int messageRepeat = 8;        // so lan lap cau mau (moi lan 47 byte)
+    public int timeWaitMs = 2000;        // thoi gian TIME_WAIT truoc khi dong socket
 }

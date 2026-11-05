@@ -1,5 +1,6 @@
 """Create report charts from test-results/ket_qua.csv."""
 import csv
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -38,6 +39,9 @@ def plot_by_window(rows, value, ylabel, filename, title):
 
 
 def main():
+    # Windows consoles may default to cp1252 while report labels are UTF-8.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     rows = load_rows()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     plot_by_window(rows, "transfer_ms", "Thời gian truyền (ms)",

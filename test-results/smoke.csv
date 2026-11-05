@@ -1,0 +1,2 @@
+loss_percent,window_size,congestion_control,trials,transfer_ms,segments,retransmissions,fast_retransmits,timeouts,max_cwnd,throughput_bytes_per_sec,data_check,success_rate
+10,32,on,1,784.00,6.00,0.00,0.00,1.00,7.00,59.95,DUNG,100.00

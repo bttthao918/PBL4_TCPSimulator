@@ -3,6 +3,7 @@ package tcpsim;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -104,6 +105,8 @@ public class ServerMultiClientTest {
             // These malformed/unconnected datagrams must not stop the server or create a session.
             waiting.sendBytes(new byte[]{1, 2, 3});
             waiting.send(new Packet(START_SEQ, 0, (byte) 0, new byte[]{42}));
+            Packet rst = waiting.receive();
+            check(Packet.hasFlag(rst.flags, Packet.FLAG_RST), "Unknown session must receive RST");
             a.open(true);
             b.open(false); // Deliberately lose the final handshake ACK.
             waiting.open(false); // An idle half-open client must not block anyone.
@@ -221,6 +224,23 @@ public class ServerMultiClientTest {
                     "Incorrect FIN acknowledgement");
             check(expected.equals(new String(ack.payload, StandardCharsets.UTF_8)),
                     "FIN report must match this client's exact bytes: " + expected);
+            // New four-step close: consume the Server FIN and ACK it. If this is
+            // a duplicate FIN after CLOSED, the server only repeats the first ACK.
+            try {
+                socket.setSoTimeout(300);
+                Packet serverFin = receive();
+                check(Packet.hasFlag(serverFin.flags, Packet.FLAG_FIN), "Expected Server FIN");
+                // Deliberately drop the first final ACK: LAST_ACK must retransmit FIN.
+                socket.setSoTimeout(1500);
+                Packet retransmittedFin = receive();
+                check(Packet.hasFlag(retransmittedFin.flags, Packet.FLAG_FIN),
+                        "Server FIN must be retransmitted when final ACK is lost");
+                send(new Packet(0, retransmittedFin.seqNum + 1, Packet.FLAG_ACK, EMPTY));
+            } catch (SocketTimeoutException ignored) {
+                // A repeated FIN for an already CLOSED session has no second FIN.
+            } finally {
+                socket.setSoTimeout(2000);
+            }
         }
 
         void send(Packet packet) throws Exception {
