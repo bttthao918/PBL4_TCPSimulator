@@ -111,8 +111,10 @@ public class ServerMultiClientTest {
         int oldReadBytes = Server.APP_READ_BYTES;
         int oldReadInterval = Server.APP_READ_INTERVAL_MS;
         Server.RECEIVE_BUFFER_BYTES = 8;
-        Server.APP_READ_BYTES = 1;
-        Server.APP_READ_INTERVAL_MS = 100000;
+        // Giữ timeout socket ngắn ngay từ lúc serve() khởi động; tạm thời
+        // không đọc byte nào để duy trì zero-window cho đến khi gửi probe.
+        Server.APP_READ_BYTES = 0;
+        Server.APP_READ_INTERVAL_MS = 1;
         try (DatagramSocket server = new DatagramSocket(0, InetAddress.getLoopbackAddress());
              Peer peer = new Peer(server.getLocalPort())) {
             Thread serverThread = new Thread(() -> {
@@ -135,7 +137,6 @@ public class ServerMultiClientTest {
                     "Server must hold data and keep rwnd=0 while full");
 
             Server.APP_READ_BYTES = 8;
-            Server.APP_READ_INTERVAL_MS = 1;
             peer.send(new Packet(0, 0, Packet.FLAG_ACK, 65535, EMPTY));
             Packet reopenedAck = peer.receive();
             check(reopenedAck.window > 0, "Zero-window probe must observe reopened rwnd");

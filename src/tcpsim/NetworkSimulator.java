@@ -112,6 +112,12 @@ public class NetworkSimulator {
      */
     public static boolean send(DatagramSocket socket, Packet packet, InetAddress address, int port,
                                 String direction, PacketEvent.Status statusIfSent) {
+        return send(socket, packet, address, port, direction, statusIfSent, null);
+    }
+
+    public static boolean send(DatagramSocket socket, Packet packet, InetAddress address, int port,
+                                String direction, PacketEvent.Status statusIfSent, String displayType) {
+        String eventType = displayType == null ? packet.flagsToString() : displayType;
         byte[] bytes = packet.encode();
         String note = (packet.payload.length > 0) ? new String(packet.payload) : "";
 
@@ -121,7 +127,7 @@ public class NetworkSimulator {
             log("[DROPPED] seq=" + packet.seqNum + " " + packet.flagsToString()
                     + " -> goi tin bi mat tren duong truyen (mo phong).");
             EventBus.publish(new PacketEvent(
-                PacketEvent.Status.LOST, direction, packet.flagsToString(),
+                PacketEvent.Status.LOST, direction, eventType,
                 packet.seqNum, packet.ackNum, packet.window, "Mo phong mang - " + note,
                 statusIfSent == PacketEvent.Status.RETRANSMITTED
             ));
@@ -149,7 +155,7 @@ public class NetworkSimulator {
         // console "Da gui..." trong Client.java) - du goi tin co the con
         // dang "tren duong" (dang tre) thi vi tri ve tren so do van hop ly.
         PacketEvent.Status eventStatus = corrupted ? PacketEvent.Status.CORRUPTED : statusIfSent;
-        EventBus.publish(new PacketEvent(eventStatus, direction, packet.flagsToString(),
+        EventBus.publish(new PacketEvent(eventStatus, direction, eventType,
                 packet.seqNum, packet.ackNum, packet.window, note,
                 statusIfSent == PacketEvent.Status.RETRANSMITTED));
 

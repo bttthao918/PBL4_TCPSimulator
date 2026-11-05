@@ -221,6 +221,7 @@ public class Visualizer {
         diagramScroll.getViewport().setBackground(Color.WHITE);
         diagramScroll.getVerticalScrollBar().setUnitIncrement(DiagramPanel.ROW_HEIGHT);
         chartPanel = new ChartPanel();
+        chartPanel.setWindowLimit(intValue(windowSpinner));
 
         JPanel visual = new JPanel(new GridBagLayout());
         visual.setBackground(Color.WHITE);
@@ -407,6 +408,7 @@ public class Visualizer {
 
     private void startSession() {
         SessionSettings settings = readSettings();
+        chartPanel.setWindowLimit(settings.windowSize);
         reset();
         runButton.setEnabled(false);
         resultBadge.setText("DANG CHAY...");
@@ -471,7 +473,9 @@ public class Visualizer {
                 int arrow = event.note.lastIndexOf(" -> ");
                 connectionState = arrow >= 0 ? event.note.substring(arrow + 4) : event.note;
             }
-            diagramPanel.addEvent(event);
+            if (!"STATE".equals(event.packetType)) {
+                diagramPanel.addEvent(event);
+            }
             countEvent(event);
             tableModel.insertRow(0, new Object[]{
                 event.time.format(TIME_FORMAT),
@@ -803,6 +807,7 @@ public class Visualizer {
         private final List<double[]> samples = new ArrayList<>();
         private final List<double[]> rtoSamples = new ArrayList<>();
         private final List<double[]> rwndSamples = new ArrayList<>();
+        private int windowLimit = 32;
 
         ChartPanel() {
             setBackground(Color.WHITE);
@@ -826,6 +831,11 @@ public class Visualizer {
             rwndSamples.clear();
         }
 
+        void setWindowLimit(int limit) {
+            windowLimit = Math.max(1, limit);
+            repaint();
+        }
+
         @Override
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
@@ -841,7 +851,7 @@ public class Visualizer {
 
             g2.setColor(new Color(40, 40, 40));
             g2.setFont(g2.getFont().deriveFont(Font.BOLD, 14f));
-            g2.drawString("cwnd, rwnd va RTO (rwnd/8 byte; RTO/SRTT quy doi 100 ms)", left, 28);
+            g2.drawString("cwnd, rwnd va RTO (rwnd theo segment, gioi han cua so)", left, 28);
 
             if (samples.size() < 2 && rtoSamples.size() < 2 && rwndSamples.size() < 2) {
                 g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 13f));
@@ -862,7 +872,6 @@ public class Visualizer {
             for (double[] s : rtoSamples) {
                 maxY = Math.max(maxY, Math.max(s[1], s[2]) / 100.0);
             }
-            for (double[] s : rwndSamples) maxY = Math.max(maxY, s[1] / 8.0);
             maxY = Math.ceil(maxY + 1);
 
             // Luoi ngang + nhan truc Y
@@ -927,7 +936,7 @@ public class Visualizer {
             // RTO/SRTT: ve tren cung truc thoi gian, chia 100 de dat cung he truc voi cwnd.
             drawRtoLine(g2, rtoSamples, 1, BLUE, maxT, maxY, left, pw, top, ph);
             drawRtoLine(g2, rtoSamples, 2, PURPLE, maxT, maxY, left, pw, top, ph);
-            drawRwndLine(g2, rwndSamples, maxT, maxY, left, pw, top, ph);
+            drawRwndLine(g2, rwndSamples, maxT, maxY, left, pw, top, ph, windowLimit);
 
             // Cham do tai moi lan timeout, cham cam tai moi lan fast retransmit
             for (double[] s : samples) {
@@ -987,17 +996,20 @@ public class Visualizer {
             g2.setStroke(new BasicStroke(1.8f));
             g2.drawLine(x, y - 4, x + 20, y - 4);
             g2.setColor(new Color(70, 70, 70));
-            g2.drawString("rwnd/8", x + 26, y);
+            g2.drawString("rwnd (segment)", x + 26, y);
         }
 
         private static void drawRwndLine(Graphics2D g2, List<double[]> values,
-                                         double maxT, double maxY, int left, int pw, int top, int ph) {
+                                         double maxT, double maxY, int left, int pw, int top, int ph,
+                                         int windowLimit) {
             g2.setColor(GREEN);
             g2.setStroke(new BasicStroke(2f));
             for (int i = 1; i < values.size(); i++) {
                 double[] a = values.get(i - 1), b = values.get(i);
-                g2.drawLine(px(a[0], maxT, left, pw), py(a[1] / 8.0, maxY, top, ph),
-                        px(b[0], maxT, left, pw), py(b[1] / 8.0, maxY, top, ph));
+                double av = Math.min(windowLimit, a[1] / 8.0);
+                double bv = Math.min(windowLimit, b[1] / 8.0);
+                g2.drawLine(px(a[0], maxT, left, pw), py(av, maxY, top, ph),
+                        px(b[0], maxT, left, pw), py(bv, maxY, top, ph));
             }
         }
 

@@ -410,7 +410,6 @@ public class Client {
             try {
                 Packet response = receiveRaw();
                 remoteWindow = response.window;
-                EventBus.publishRwnd(System.currentTimeMillis() - sessionStartMs, remoteWindow);
                 if (Packet.hasFlag(response.flags, Packet.FLAG_RST)) {
                     report.failReason = response.payload.length == 0
                             ? "Server tu choi ket noi (RST)"
@@ -470,14 +469,14 @@ public class Client {
         int segmentIndex = 1;
 
         while (offset < fullData.length && !transferFailed) {
-            // Chi cho khi cua so DAY (so segment chua ACK da dat cua so hien tai).
-            // Con cho trong cua so thi gui tiep NGAY, khong cho ACK cua goi truoc.
-            waitForWindowRoom();
-            if (transferFailed) break;
-
             int end = Math.min(offset + SEGMENT_SIZE, fullData.length);
             byte[] segmentPayload = new byte[end - offset];
             System.arraycopy(fullData, offset, segmentPayload, 0, segmentPayload.length);
+
+            // Chi cho khi cua so day va tong byte dang bay van nam trong rwnd moi nhat.
+            // Con cho trong cua so thi gui tiep NGAY, khong cho ACK cua goi truoc.
+            waitForWindowRoom(segmentPayload.length);
+            if (transferFailed) break;
 
             sendDataSegment(currentSeq, segmentPayload, (byte) 0, segmentIndex);
 
@@ -613,13 +612,19 @@ public class Client {
     }
 
     /** BUOC 1: main thread dung o day cho toi khi cua so con cho trong (hoac truyen that bai). */
-    static void waitForWindowRoom() throws InterruptedException {
+    static void waitForWindowRoom(int nextPayloadBytes) throws InterruptedException {
         while (!transferFailed) {
             int inflight;
+            int inflightBytes;
             synchronized (unackedSegments) {
                 inflight = unackedSegments.size();
+                inflightBytes = 0;
+                for (SegmentInfo info : unackedSegments.values()) {
+                    inflightBytes += info.payload.length;
+                }
             }
-            if (inflight < flowControlledWindow()) {
+            if (inflight < flowControlledWindow()
+                    && inflightBytes + nextPayloadBytes <= remoteWindow) {
                 return;
             }
             if (remoteWindow < SEGMENT_SIZE) {
@@ -667,8 +672,6 @@ public class Client {
         while (sessionGen == gen) {
             try {
                 Packet response = receiveRaw();
-                remoteWindow = response.window;
-                EventBus.publishRwnd(System.currentTimeMillis() - sessionStartMs, remoteWindow);
                 if (Packet.hasFlag(response.flags, Packet.FLAG_RST)) {
                     String reason = response.payload.length == 0 ? "Server tu choi: chua co phien" :
                             new String(response.payload, StandardCharsets.UTF_8);
@@ -690,6 +693,16 @@ public class Client {
                     continue;
                 }
                 if (Packet.hasFlag(response.flags, Packet.FLAG_ACK)) {
+                    boolean dataAck = !Packet.hasFlag(response.flags, Packet.FLAG_SYN)
+                            && !Packet.hasFlag(response.flags, Packet.FLAG_FIN)
+                            && response.payload.length == 0
+                            && (connectionState == ConnectionState.ESTABLISHED
+                                || connectionState == ConnectionState.FIN_WAIT_1
+                                || connectionState == ConnectionState.FIN_WAIT_2);
+                    if (dataAck) {
+                        remoteWindow = response.window;
+                        EventBus.publishRwnd(System.currentTimeMillis() - sessionStartMs, remoteWindow);
+                    }
                     int ackNum = response.ackNum;
                     // BUOC 4: ACK cua FIN co kem bao cao cua Server -> luu lai de doi chieu cuoi phien.
                     if (response.payload.length > 0) {
@@ -847,8 +860,10 @@ public class Client {
 
     static void sendWindowProbe() {
         try {
-            sendRaw(new Packet(0, 0, Packet.FLAG_ACK, 65535, new byte[0]));
-            log("rwnd=0 -> gui zero-window probe");
+            Packet probe = new Packet(0, 0, Packet.FLAG_ACK, 65535, new byte[0]);
+            NetworkSimulator.send(clientSocket, probe, serverAddress, SERVER_PORT,
+                    "Client -> Server", PacketEvent.Status.SENT, "PROBE");
+            log("PROBE rwnd=0 -> gui zero-window probe");
         } catch (Exception e) {
             log("Loi gui zero-window probe: " + e.getMessage());
         }

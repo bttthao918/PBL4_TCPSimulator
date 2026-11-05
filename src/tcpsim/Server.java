@@ -135,7 +135,9 @@ public class Server {
     static void serve(DatagramSocket serverSocket) throws IOException {
         // Chi vong lap nay sua sessions, khong can tao thread/khoa cho tung Client.
         Map<InetSocketAddress, ClientSession> sessions = new HashMap<>();
-        serverSocket.setSoTimeout(SESSION_CLEANUP_INTERVAL_MS);
+        int receiveTimeoutMs = Math.min(SESSION_CLEANUP_INTERVAL_MS,
+                Math.max(5, APP_READ_INTERVAL_MS / 2));
+        serverSocket.setSoTimeout(receiveTimeoutMs);
         long lastCleanupNs = System.nanoTime();
         long lastAppReadMs = System.currentTimeMillis();
         log("Server dang lang nghe tai cong " + serverSocket.getLocalPort()
