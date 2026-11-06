@@ -29,4 +29,5 @@ public class SessionReport {
 
     public long handshakeMs = 0;         // thoi gian bat tay
     public long transferMs = 0;          // thoi gian truyen du lieu (tu sau bat tay den khi FIN duoc ACK)
+    public String receivedFilePath = "";
 }

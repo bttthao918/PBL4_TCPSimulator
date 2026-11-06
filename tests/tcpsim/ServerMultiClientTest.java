@@ -15,6 +15,12 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.util.Comparator;
+import java.util.Random;
 
 import tcpsim.gui.EventBus;
 import tcpsim.gui.SessionReport;
@@ -51,7 +57,54 @@ public class ServerMultiClientTest {
         }
         if (serverFailure.get() != null) throw new AssertionError("Server failed", serverFailure.get());
         testClientSessionWithCorruption();
+        testBinaryFileWithLossAndDelay();
         System.out.println("PASS: independent sessions, retries, reconnects, UTF-8, and 8 concurrent clients.");
+    }
+
+    private static void testBinaryFileWithLossAndDelay() throws Exception {
+        Path source = Files.createTempFile("tcpsim-random-", ".bin");
+        byte[] data = new byte[50 * 1024];
+        new Random(123456789L).nextBytes(data);
+        Files.write(source, data);
+        Files.createDirectories(Paths.get("received"));
+        long started = System.currentTimeMillis();
+        AtomicReference<Throwable> serverFailure = new AtomicReference<>();
+        try (DatagramSocket server = new DatagramSocket(Server.PORT, InetAddress.getLoopbackAddress())) {
+            Thread serverThread = new Thread(() -> {
+                try { Server.serve(server); }
+                catch (Throwable e) { if (!server.isClosed()) serverFailure.set(e); }
+            }, "BinaryFileServer");
+            serverThread.setDaemon(true);
+            serverThread.start();
+            SessionSettings settings = new SessionSettings();
+            settings.serverIp = "127.0.0.1";
+            settings.dataSource = SessionSettings.FILE;
+            settings.filePath = source.toString();
+            settings.segmentSize = 1000;
+            settings.lossPercent = 10;
+            settings.delayMinMs = 100;
+            settings.delayMaxMs = 100;
+            settings.windowSize = 32;
+            settings.messageRepeat = 1;
+            EventBus.clearAll();
+            Client.runSession(settings);
+            SessionReport report = EventBus.pollReport();
+            check(report != null && report.success && "DUNG".equals(report.dataCheck),
+                    "Binary file transfer must pass length+CRC32: " + (report == null ? "null" : report.failReason));
+            Path received = Files.list(Paths.get("received"))
+                    .filter(p -> p.toFile().lastModified() >= started && p.toFile().length() == data.length)
+                    .max(Comparator.comparingLong(p -> p.toFile().lastModified())).orElseThrow();
+            check(java.util.Arrays.equals(hash(source), hash(received)), "Received binary SHA-256 differs from source");
+            server.close();
+            serverThread.join(3000);
+        } finally {
+            Files.deleteIfExists(source);
+        }
+        if (serverFailure.get() != null) throw new AssertionError("Binary file server failed", serverFailure.get());
+    }
+
+    private static byte[] hash(Path path) throws Exception {
+        return MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path));
     }
 
     private static void testClientSessionWithCorruption() throws Exception {

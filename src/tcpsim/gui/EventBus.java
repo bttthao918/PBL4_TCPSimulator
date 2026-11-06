@@ -21,6 +21,16 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * dieu nay dam bao Client/Server van chay dung ke ca khi khong mo GUI.
  */
 public class EventBus {
+    private static final int MAX_EVENTS = 4000;
+    private static final int MAX_SAMPLES = 4000;
+    private static final ConcurrentLinkedQueue<double[]> progressQueue = new ConcurrentLinkedQueue<>();
+
+    public static void publishProgress(long ackedBytes, long totalBytes, long startMs) {
+        while (progressQueue.size() >= 8) progressQueue.poll();
+        progressQueue.add(new double[]{ackedBytes, totalBytes, Math.max(0, System.currentTimeMillis() - startMs)});
+    }
+
+    public static double[] pollProgress() { return progressQueue.poll(); }
 
     private static final ConcurrentLinkedQueue<PacketEvent> queue = new ConcurrentLinkedQueue<>();
 
@@ -30,7 +40,7 @@ public class EventBus {
     private static final ConcurrentLinkedQueue<double[]> cwndQueue = new ConcurrentLinkedQueue<>();
 
     public static void publishCwnd(double timeMs, double cwnd, double ssthresh, int type) {
-        cwndQueue.add(new double[]{timeMs, cwnd, ssthresh, type});
+        if (cwndQueue.size() < MAX_SAMPLES) cwndQueue.add(new double[]{timeMs, cwnd, ssthresh, type});
     }
 
     public static List<double[]> drainCwnd() {
@@ -49,7 +59,7 @@ public class EventBus {
     private static final ConcurrentLinkedQueue<double[]> rwndQueue = new ConcurrentLinkedQueue<>();
 
     public static void publishRwnd(double timeMs, int rwndBytes) {
-        rwndQueue.add(new double[]{timeMs, rwndBytes});
+        if (rwndQueue.size() < MAX_SAMPLES) rwndQueue.add(new double[]{timeMs, rwndBytes});
     }
 
     public static List<double[]> drainRwnd() {
@@ -60,7 +70,7 @@ public class EventBus {
     }
 
     public static void publishRto(double timeMs, double srttMs, double rtoMs) {
-        rtoQueue.add(new double[]{timeMs, srttMs, rtoMs});
+        if (rtoQueue.size() < MAX_SAMPLES) rtoQueue.add(new double[]{timeMs, srttMs, rtoMs});
     }
 
     public static List<double[]> drainRto() {
@@ -89,10 +99,12 @@ public class EventBus {
         drainRto();
         drainRwnd();
         reportQueue.clear();
+        progressQueue.clear();
     }
 
     /** Goi ham nay bat cu luc nao co mot su kien goi tin can hien thi. */
     public static void publish(PacketEvent event) {
+        while (queue.size() >= MAX_EVENTS) queue.poll();
         queue.add(event);
     }
 

@@ -5,6 +5,7 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.awt.geom.Path2D;
+import java.io.File;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -55,8 +56,13 @@ public class Visualizer {
     private final JSpinner ssthreshSpinner;
     private final JSpinner sizeSpinner;
     private final JSpinner timeWaitSpinner;
+    private final JSpinner segmentSpinner;
+    private final JComboBox<String> sourceCombo;
+    private final JTextField messageField;
+    private final JTextField fileField;
     private final JCheckBox ccCheck;
     private final JButton runButton;
+    private final JButton openReceivedButton;
 
     // ---- Cot ket qua ----
     private final JLabel resultBadge;
@@ -70,6 +76,7 @@ public class Visualizer {
     private final JLabel ssthreshLabel;
     private final JLabel rwndLabel;
     private final JLabel countersLabel;
+    private final JLabel progressLabel;
 
     // So lieu dem
     private int sentCount = 0;
@@ -100,6 +107,14 @@ public class Visualizer {
         windowSpinner = spinner("windowSpinner", initial.windowSize, 1, 64, 1);
         ssthreshSpinner = spinner("ssthreshSpinner", initial.ssthresh, 2, 64, 1);
         sizeSpinner = spinner("sizeSpinner", initial.messageRepeat, 1, 100, 1);
+        segmentSpinner = spinner("segmentSpinner", initial.segmentSize, 8, 1024, 1);
+        sourceCombo = new JComboBox<>(new String[]{SessionSettings.SAMPLE, SessionSettings.TEXT, SessionSettings.FILE});
+        sourceCombo.setSelectedItem(initial.dataSource);
+        messageField = new JTextField(initial.messageText);
+        fileField = new JTextField(initial.filePath);
+        JButton browseButton = new JButton("...");
+        browseButton.addActionListener(e -> chooseFile());
+        sourceCombo.addActionListener(e -> updateSourceFields());
         timeWaitSpinner = spinner("timeWaitSpinner", initial.timeWaitMs, 0, 30000, 100);
         ccCheck = new JCheckBox("Bat dieu khien tac nghen", initial.congestionControl);
         ccCheck.setName("ccCheck");
@@ -131,6 +146,13 @@ public class Visualizer {
         addFormRow(form, r++, "Cua so toi da", windowSpinner);
         addFormRow(form, r++, "ssthresh", ssthreshSpinner);
         addFormRow(form, r++, "Du lieu (x47 byte)", sizeSpinner);
+        addFormRow(form, r++, "Nguon du lieu", sourceCombo);
+        addFormRow(form, r++, "Tin nhan", messageField);
+        JPanel fileChooser = new JPanel(new BorderLayout(4, 0));
+        fileChooser.add(fileField, BorderLayout.CENTER);
+        fileChooser.add(browseButton, BorderLayout.EAST);
+        addFormRow(form, r++, "File (<=200 KB)", fileChooser);
+        addFormRow(form, r++, "Segment (byte)", segmentSpinner);
         addFormRow(form, r++, "TIME_WAIT (ms)", timeWaitSpinner);
         left(form);
         side.add(form);
@@ -141,6 +163,13 @@ public class Visualizer {
         left(runButton);
         runButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
         side.add(runButton);
+        openReceivedButton = new JButton("Mo thu muc received");
+        openReceivedButton.setEnabled(false);
+        openReceivedButton.addActionListener(e -> openReceivedFolder());
+        left(openReceivedButton);
+        side.add(Box.createVerticalStrut(5));
+        side.add(openReceivedButton);
+        updateSourceFields();
 
         side.add(Box.createVerticalStrut(20));
         side.add(sectionTitle("KET QUA"));
@@ -203,6 +232,7 @@ public class Visualizer {
         ssthreshLabel = new JLabel();
         rwndLabel = new JLabel();
         countersLabel = new JLabel();
+        progressLabel = new JLabel("Tien do: 0% | 0 byte/s");
         countersLabel.setForeground(TEXT_MUTED);
         strip.add(phaseBadge);
         strip.add(cwndLabel);
@@ -210,6 +240,7 @@ public class Visualizer {
         strip.add(rwndLabel);
         strip.add(Box.createHorizontalStrut(30));
         strip.add(countersLabel);
+        strip.add(progressLabel);
         updateStatusBar();
 
         // ================= Phan giua: 2 tab =================
@@ -401,9 +432,33 @@ public class Visualizer {
         s.windowSize = intValue(windowSpinner);
         s.ssthresh = intValue(ssthreshSpinner);
         s.messageRepeat = intValue(sizeSpinner);
+        s.dataSource = (String) sourceCombo.getSelectedItem();
+        s.messageText = messageField.getText();
+        s.filePath = fileField.getText().trim();
+        s.segmentSize = intValue(segmentSpinner);
         s.timeWaitMs = intValue(timeWaitSpinner);
         s.congestionControl = ccCheck.isSelected();
         return s;
+    }
+
+    private void chooseFile() {
+        JFileChooser chooser = new JFileChooser();
+        if (chooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION) fileField.setText(chooser.getSelectedFile().getAbsolutePath());
+    }
+
+    private void updateSourceFields() {
+        boolean sample = SessionSettings.SAMPLE.equals(sourceCombo.getSelectedItem());
+        boolean text = SessionSettings.TEXT.equals(sourceCombo.getSelectedItem());
+        sizeSpinner.setEnabled(sample);
+        messageField.setEnabled(text);
+        fileField.setEnabled(!sample && !text);
+        segmentSpinner.setValue(sample ? 8 : 1000);
+        segmentSpinner.setToolTipText(sample ? "Cau mau dung 8 byte" : "8..1000 byte (header UDP 15 byte)");
+    }
+
+    private void openReceivedFolder() {
+        try { Desktop.getDesktop().open(new File("received")); }
+        catch (Exception e) { reasonLabel.setText("Khong mo duoc thu muc received: " + e.getMessage()); }
     }
 
     private void startSession() {
@@ -465,6 +520,7 @@ public class Visualizer {
         List<double[]> newSamples = EventBus.drainCwnd();
         List<double[]> newRtoSamples = EventBus.drainRto();
         List<double[]> newRwndSamples = EventBus.drainRwnd();
+        double[] progress;
         boolean followDiagram = diagramIsAtBottom();
 
         for (PacketEvent event : newEvents) {
@@ -486,6 +542,7 @@ public class Visualizer {
                 statusText(event.status),
                 event.note == null ? "" : event.note
             });
+            while (tableModel.getRowCount() > 2000) tableModel.removeRow(tableModel.getRowCount() - 1);
         }
         for (double[] sample : newSamples) {
             chartPanel.addSample(sample);
@@ -495,6 +552,11 @@ public class Visualizer {
         for (double[] sample : newRwndSamples) {
             chartPanel.addRwndSample(sample);
             currentRwnd = (int) sample[1];
+        }
+        while ((progress = EventBus.pollProgress()) != null) {
+            double pct = progress[1] == 0 ? 100 : 100.0 * progress[0] / progress[1];
+            double speed = progress[2] <= 0 ? 0 : progress[0] * 1000.0 / progress[2];
+            progressLabel.setText(String.format("Tien do: %.0f%% | %.0f byte/s", pct, speed));
         }
         if (!newEvents.isEmpty() || !newSamples.isEmpty() || !newRtoSamples.isEmpty() || !newRwndSamples.isEmpty()) {
             updateStatusBar();
@@ -510,6 +572,7 @@ public class Visualizer {
         if (report != null) {
             showReport(report);
             runButton.setEnabled(true);
+            openReceivedButton.setEnabled(true);
         }
     }
 
@@ -676,6 +739,7 @@ public class Visualizer {
 
         void addEvent(PacketEvent event) {
             events.add(event);
+            if (events.size() > 2000) events.remove(0);
         }
 
         void clear() {
@@ -815,14 +879,17 @@ public class Visualizer {
 
         void addSample(double[] sample) {
             samples.add(sample);
+            if (samples.size() > 2000) samples.remove(0);
         }
 
         void addRtoSample(double[] sample) {
             rtoSamples.add(sample);
+            if (rtoSamples.size() > 2000) rtoSamples.remove(0);
         }
 
         void addRwndSample(double[] sample) {
             rwndSamples.add(sample);
+            if (rwndSamples.size() > 2000) rwndSamples.remove(0);
         }
 
         void clear() {

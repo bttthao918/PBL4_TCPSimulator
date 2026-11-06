@@ -10,6 +10,11 @@ import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
@@ -31,6 +36,7 @@ public class Server {
     static final byte[] DISCOVERY_REQUEST = "PBL4_DISCOVER_V1".getBytes(StandardCharsets.US_ASCII);
     static final byte[] DISCOVERY_RESPONSE = "PBL4_SERVER_V1".getBytes(StandardCharsets.US_ASCII);
     static final int BUFFER_SIZE = 2048;
+    private static final DateTimeFormatter FILE_TIME = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS");
     static final int SESSION_CLEANUP_INTERVAL_MS = 1000;
     static final long SESSION_IDLE_TIMEOUT_NS = TimeUnit.MINUTES.toNanos(2);
     static int RECEIVE_BUFFER_BYTES = 65535;
@@ -226,7 +232,9 @@ public class Server {
     }
 
     private static void handlePacket(DatagramSocket socket, ClientSession session, Packet packet) {
-        session.log("Nhan goi | " + packet + " | state=" + session.state);
+        session.log("Nhan goi | loai=" + packet.flagsToString() + " | seq=" + packet.seqNum
+                + " | ack=" + packet.ackNum + " | payloadBytes=" + packet.payload.length
+                + " | checksum=" + packet.checksumValid + " | state=" + session.state);
 
         // SYN-ACK bi mat: gui lai dung SYN-ACK cua Client nay, khong reset buffer.
         if (packet.flags == Packet.FLAG_SYN && packet.payload.length == 0
@@ -279,10 +287,23 @@ public class Server {
             CRC32 crc = new CRC32();
             crc.update(assembled);
             String report = "len=" + assembled.length + ";crc=" + Long.toHexString(crc.getValue());
+            Path receivedFile = Paths.get("received", "unknown.bin");
+            try {
+                Path receivedDir = Paths.get("received");
+                Files.createDirectories(receivedDir);
+                String safeIp = session.address.getAddress().getHostAddress().replace(':', '_');
+                receivedFile = receivedDir.resolve(safeIp + "_" + session.address.getPort() + "_"
+                        + FILE_TIME.format(LocalDateTime.now()) + ".bin");
+                Files.write(receivedFile, assembled);
+            } catch (IOException e) {
+                session.log("CANH BAO: khong luu duoc file received: " + e.getMessage());
+            }
             session.lastFinAckPayload = report.getBytes(StandardCharsets.UTF_8);
             session.lastFinSeq = packet.seqNum;
-            session.log("=== DU LIEU DA RAP DUOC (" + assembled.length + " byte) ===");
-            session.log("\"" + new String(assembled, StandardCharsets.UTF_8) + "\"");
+            session.log("=== DU LIEU DA RAP DUOC (" + assembled.length + " byte), da luu: "
+                    + receivedFile.toAbsolutePath() + " ===");
+            session.log(assembled.length <= 4096 ? "Tom tat: " + new String(assembled, StandardCharsets.UTF_8)
+                    : "Tom tat: file lon, khong in toan bo noi dung.");
             session.log("Bao cao gui kem ACK cua FIN: " + report);
             changeState(session, ConnectionState.CLOSE_WAIT);
             send(socket, session, new Packet(0, packet.seqNum + 1, Packet.FLAG_ACK,

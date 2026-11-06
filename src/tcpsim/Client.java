@@ -3,6 +3,9 @@ package tcpsim;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -57,7 +60,11 @@ public class Client {
     static final int MAX_HANDSHAKE_RETRIES = 5;
     static final int DEFAULT_TIME_WAIT_MS = 2000;
 
-    static final int SEGMENT_SIZE = 8;
+    static final int SAMPLE_SEGMENT_SIZE = 8;
+    static final int MAX_PAYLOAD_SIZE = 1000;
+    static volatile int segmentSize = SAMPLE_SEGMENT_SIZE;
+    static volatile int dataStartSeq = 0;
+    static volatile int totalDataBytes = 0;
     // Cau mau 47 byte. Moi phien lap lai no 'message_repeat' lan (chinh duoc tren GUI)
     // de co nhieu segment -> thay ro hieu qua cua cua so truot va slow start.
     static final String BASE_MESSAGE = "Xin chao Server, day la bai PBL4 mo phong TCP! ";
@@ -251,7 +258,7 @@ public class Client {
     }
 
     static int flowControlledWindow() {
-        return Math.min(currentWindow(), remoteWindow / SEGMENT_SIZE);
+        return Math.min(currentWindow(), Math.max(1, remoteWindow / Math.max(1, segmentSize)));
     }
 
     /** Thong tin 1 segment dang cho ACK: du lieu, co, thoi diem gui gan nhat, so lan da thu lai. */
@@ -380,9 +387,12 @@ public class Client {
         int maxDelay = Math.max(minDelay, s.delayMaxMs);
         NetworkSimulator.configure(s.lossPercent / 100.0, s.corruptPercent / 100.0, minDelay, maxDelay);
 
+        byte[] fullData = loadData(s);
+        segmentSize = s.dataSource.equals(SessionSettings.SAMPLE) ? SAMPLE_SEGMENT_SIZE
+                : Math.max(8, Math.min(MAX_PAYLOAD_SIZE, s.segmentSize));
         log("Cua so toi da (window_size) = " + windowSize + " segment | dieu khien tac nghen: "
                 + (s.congestionControl ? "BAT (ssthresh ban dau=" + s.ssthresh + ")" : "TAT")
-                + " | du lieu = " + (BASE_MESSAGE.length() * s.messageRepeat) + " byte");
+                + " | du lieu = " + fullData.length + " byte");
         if (s.congestionControl && windowSize < 16) {
             log("LUU Y: window_size=" + windowSize + " dang chan cwnd. Dat window_size=32 de thay slow start ro hon.");
         }
@@ -461,15 +471,16 @@ public class Client {
         timeoutThread.start();
 
         // ================= TRUYEN DU LIEU (cua so truot + dieu khien tac nghen) =================
-        byte[] fullData = BASE_MESSAGE.repeat(Math.max(1, s.messageRepeat)).getBytes(StandardCharsets.UTF_8);
+        dataStartSeq = currentSeq;
+        totalDataBytes = fullData.length;
         report.payloadBytes = fullData.length;
-        log("Chuan bi gui " + fullData.length + " byte, chia thanh cac segment " + SEGMENT_SIZE + " byte.\n");
+        log("Chuan bi gui " + fullData.length + " byte, chia thanh cac segment " + segmentSize + " byte.\n");
 
         int offset = 0;
         int segmentIndex = 1;
 
         while (offset < fullData.length && !transferFailed) {
-            int end = Math.min(offset + SEGMENT_SIZE, fullData.length);
+            int end = Math.min(offset + segmentSize, fullData.length);
             byte[] segmentPayload = new byte[end - offset];
             System.arraycopy(fullData, offset, segmentPayload, 0, segmentPayload.length);
 
@@ -545,6 +556,21 @@ public class Client {
         report.success = true;
     }
 
+    private static byte[] loadData(SessionSettings s) throws IOException {
+        if (SessionSettings.TEXT.equals(s.dataSource)) {
+            byte[] data = (s.messageText == null ? "" : s.messageText).getBytes(StandardCharsets.UTF_8);
+            if (data.length > 200 * 1024) throw new IOException("Tin nhan vuot qua 200 KB");
+            return data;
+        }
+        if (SessionSettings.FILE.equals(s.dataSource)) {
+            Path path = Paths.get(s.filePath == null ? "" : s.filePath);
+            long size = Files.size(path);
+            if (size > 200 * 1024) throw new IOException("File vuot qua 200 KB");
+            return Files.readAllBytes(path);
+        }
+        return BASE_MESSAGE.repeat(Math.max(1, s.messageRepeat)).getBytes(StandardCharsets.UTF_8);
+    }
+
     /**
      * Resolve server IP. "auto" broadcasts a small discovery packet on the LAN,
      * so a client does not depend on a stale DHCP address in client-config.txt.
@@ -607,8 +633,14 @@ public class Client {
 
         String label = (flags == Packet.FLAG_FIN) ? "FIN" : ("segment #" + segmentIndex);
         log("Gui " + label + " (seq=" + seq + ")"
-                + (payload.length > 0 ? ": \"" + new String(payload) + "\"" : "")
+                + (payload.length > 0 ? ": " + payloadSummary(payload) : "")
                 + " | dang bay=" + inflight + "/cwnd=" + currentWindow() + ", rwnd=" + remoteWindow);
+    }
+
+    private static String payloadSummary(byte[] payload) {
+        if (payload.length > 64) return "[" + payload.length + " byte]";
+        for (byte b : payload) if (b < 32 || b > 126) return "[" + payload.length + " byte nhị phân]";
+        return "\"" + new String(payload, StandardCharsets.UTF_8) + "\"";
     }
 
     /** BUOC 1: main thread dung o day cho toi khi cua so con cho trong (hoac truyen that bai). */
@@ -627,7 +659,7 @@ public class Client {
                     && inflightBytes + nextPayloadBytes <= remoteWindow) {
                 return;
             }
-            if (remoteWindow < SEGMENT_SIZE) {
+            if (remoteWindow < Math.min(segmentSize, nextPayloadBytes)) {
                 long now = System.currentTimeMillis();
                 if (now - lastWindowProbeMs >= ZERO_WINDOW_PROBE_INTERVAL_MS) {
                     sendWindowProbe();
@@ -704,6 +736,10 @@ public class Client {
                         EventBus.publishRwnd(System.currentTimeMillis() - sessionStartMs, remoteWindow);
                     }
                     int ackNum = response.ackNum;
+                    if (dataStartSeq > 0 && totalDataBytes > 0) {
+                        EventBus.publishProgress(Math.max(0, Math.min(totalDataBytes, (long) ackNum - dataStartSeq)),
+                                totalDataBytes, sessionStartMs);
+                    }
                     // BUOC 4: ACK cua FIN co kem bao cao cua Server -> luu lai de doi chieu cuoi phien.
                     if (response.payload.length > 0) {
                         serverReport = new String(response.payload, StandardCharsets.UTF_8);

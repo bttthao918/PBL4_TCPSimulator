@@ -7,6 +7,9 @@ package tcpsim.gui;
  * client-config.txt, sau do nguoi dung co the sua ngay tren GUI roi bam "Chay lai".
  */
 public class SessionSettings {
+    public static final String SAMPLE = "Câu mẫu";
+    public static final String TEXT = "Nhập tin nhắn";
+    public static final String FILE = "Chọn file";
     /** "auto" lets Client discover the server on the local LAN. */
     public String serverIp = "auto";
     public int lossPercent = 0;          // ti le mat goi gia lap cua Client (%)
@@ -17,5 +20,9 @@ public class SessionSettings {
     public boolean congestionControl = true;
     public int ssthresh = 16;            // nguong ssthresh ban dau (segment)
     public int messageRepeat = 8;        // so lan lap cau mau (moi lan 47 byte)
+    public String dataSource = SAMPLE;
+    public String messageText = "";
+    public String filePath = "";
+    public int segmentSize = 1000;
     public int timeWaitMs = 2000;        // thoi gian TIME_WAIT truoc khi dong socket
 }
