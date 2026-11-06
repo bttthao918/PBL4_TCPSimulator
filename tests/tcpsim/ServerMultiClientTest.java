@@ -58,7 +58,73 @@ public class ServerMultiClientTest {
         if (serverFailure.get() != null) throw new AssertionError("Server failed", serverFailure.get());
         testClientSessionWithCorruption();
         testBinaryFileWithLossAndDelay();
+        testSmallServerBufferShrinksSegment();
+        testStalledZeroWindowTimesOut();
         System.out.println("PASS: independent sessions, retries, reconnects, UTF-8, and 8 concurrent clients.");
+    }
+
+    private static void testSmallServerBufferShrinksSegment() throws Exception {
+        Path source = Files.createTempFile("tcpsim-small-buffer-", ".bin");
+        byte[] data = new byte[200];
+        new Random(7L).nextBytes(data);
+        Files.write(source, data);
+        int oldBuffer = Server.RECEIVE_BUFFER_BYTES;
+        try {
+            Server.RECEIVE_BUFFER_BYTES = 16;
+            SessionReport report = runFileSession(source, 1000);
+            check(report.success && "DUNG".equals(report.dataCheck), "Small server buffer must still transfer correctly");
+            check(Client.segmentSize == 16, "Client must shrink the effective segment to rwnd=16");
+        } finally {
+            Server.RECEIVE_BUFFER_BYTES = oldBuffer;
+            Files.deleteIfExists(source);
+        }
+    }
+
+    private static void testStalledZeroWindowTimesOut() throws Exception {
+        Path source = Files.createTempFile("tcpsim-zero-window-", ".bin");
+        Files.write(source, new byte[200]);
+        int oldBuffer = Server.RECEIVE_BUFFER_BYTES;
+        int oldAppRead = Server.APP_READ_BYTES;
+        long oldTimeout = Client.NO_PROGRESS_TIMEOUT_MS;
+        try {
+            Server.RECEIVE_BUFFER_BYTES = 0;
+            Server.APP_READ_BYTES = 0;
+            Client.NO_PROGRESS_TIMEOUT_MS = 3000;
+            SessionReport report = runFileSession(source, 1000);
+            check(!report.success && report.failReason.contains("Server khong mo cua so nhan (rwnd=0) sau 3 s"),
+                    "Zero-window session must fail with a clear timeout reason: " + report.failReason);
+        } finally {
+            Server.RECEIVE_BUFFER_BYTES = oldBuffer;
+            Server.APP_READ_BYTES = oldAppRead;
+            Client.NO_PROGRESS_TIMEOUT_MS = oldTimeout;
+            Files.deleteIfExists(source);
+        }
+    }
+
+    private static SessionReport runFileSession(Path source, int segmentSize) throws Exception {
+        AtomicReference<Throwable> serverFailure = new AtomicReference<>();
+        try (DatagramSocket server = new DatagramSocket(Server.PORT, InetAddress.getLoopbackAddress())) {
+            Thread serverThread = new Thread(() -> {
+                try { Server.serve(server); }
+                catch (Throwable e) { if (!server.isClosed()) serverFailure.set(e); }
+            }, "FlowControlIntegrationServer");
+            serverThread.setDaemon(true);
+            serverThread.start();
+            SessionSettings settings = new SessionSettings();
+            settings.serverIp = "127.0.0.1";
+            settings.dataSource = SessionSettings.FILE;
+            settings.filePath = source.toString();
+            settings.segmentSize = segmentSize;
+            settings.timeWaitMs = 0;
+            EventBus.clearAll();
+            Client.runSession(settings);
+            SessionReport report = EventBus.pollReport();
+            server.close();
+            serverThread.join(3000);
+            if (serverFailure.get() != null) throw new AssertionError("Flow-control server failed", serverFailure.get());
+            check(report != null, "Flow-control session must publish a report");
+            return report;
+        }
     }
 
     private static void testBinaryFileWithLossAndDelay() throws Exception {
@@ -190,9 +256,13 @@ public class ServerMultiClientTest {
                     "Server must hold data and keep rwnd=0 while full");
 
             Server.APP_READ_BYTES = 8;
-            peer.send(new Packet(0, 0, Packet.FLAG_ACK, 65535, EMPTY));
-            Packet reopenedAck = peer.receive();
-            check(reopenedAck.window > 0, "Zero-window probe must observe reopened rwnd");
+            boolean reopened = false;
+            for (int attempt = 0; attempt < 10 && !reopened; attempt++) {
+                peer.send(new Packet(0, 0, Packet.FLAG_ACK, 65535, EMPTY));
+                reopened = peer.receive().window > 0;
+                if (!reopened) Thread.sleep(5);
+            }
+            check(reopened, "Zero-window probe must observe reopened rwnd");
             server.close();
             serverThread.join(1000);
         } finally {
@@ -326,8 +396,9 @@ public class ServerMultiClientTest {
             String expected = "len=" + data.length + ";crc=" + Long.toHexString(crc.getValue());
             check(ack.flags == Packet.FLAG_ACK && ack.ackNum == START_SEQ + data.length + 1,
                     "Incorrect FIN acknowledgement");
-            check(expected.equals(new String(ack.payload, StandardCharsets.UTF_8)),
-                    "FIN report must match this client's exact bytes: " + expected);
+            String report = new String(ack.payload, StandardCharsets.UTF_8);
+            check(report.startsWith(expected + ";file=") && report.length() > expected.length() + 6,
+                    "FIN report must contain length, CRC32, and saved filename: " + report);
             // New four-step close: consume the Server FIN and ACK it. If this is
             // a duplicate FIN after CLOSED, the server only repeats the first ACK.
             try {

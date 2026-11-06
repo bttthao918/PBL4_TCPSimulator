@@ -63,6 +63,7 @@ public class Client {
     static final int SAMPLE_SEGMENT_SIZE = 8;
     static final int MAX_PAYLOAD_SIZE = 1000;
     static volatile int segmentSize = SAMPLE_SEGMENT_SIZE;
+    static volatile int requestedSegmentSize = SAMPLE_SEGMENT_SIZE;
     static volatile int dataStartSeq = 0;
     static volatile int totalDataBytes = 0;
     // Cau mau 47 byte. Moi phien lap lai no 'message_repeat' lan (chinh duoc tren GUI)
@@ -97,6 +98,9 @@ public class Client {
     static volatile long sessionStartMs = 0;
     static volatile long lastWindowProbeMs = 0;
     static final long ZERO_WINDOW_PROBE_INTERVAL_MS = 1000;
+    /** Thoi gian toi da khong co ACK tien len khi dang cho rwnd mo. Test co the giam gia tri nay. */
+    static volatile long NO_PROGRESS_TIMEOUT_MS = 60_000L;
+    static volatile long lastAckProgressMs = 0;
 
     // ---------------- BUOC 4 + 5: thong ke va quan ly nhieu phien ----------------
     static final AtomicInteger statFirstSends = new AtomicInteger();   // so segment du lieu gui lan dau
@@ -109,7 +113,7 @@ public class Client {
     static final int DUP_ACK_THRESHOLD = 3;
     static int lastAckNum = 0;
     static int dupAckCount = 0;
-    static volatile String serverReport = null;  // "len=..;crc=.." Server gui kem trong ACK cua FIN
+    static volatile String serverReport = null;  // "len=..;crc=..;file=.." Server gui kem trong ACK cua FIN
     // Moi phien co 1 so rieng. Cac thread nen thay so nay doi (phien da ket thuc / phien moi bat dau)
     // thi tu thoat, nen chay lai nhieu lan khong bi nhan doi thread.
     static volatile int sessionGen = 0;
@@ -133,6 +137,16 @@ public class Client {
         log(message);
         EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Client", "STATE",
                 0, 0, message));
+    }
+
+    public static void cancelSession() {
+        resetReason = "Nguoi dung huy phien";
+        transferFailed = true;
+        sessionGen++;
+        try {
+            if (clientSocket != null) clientSocket.close();
+        } catch (Exception ignored) {
+        }
     }
 
     /**
@@ -374,6 +388,7 @@ public class Client {
         resetReason = null;
         remoteWindow = 65535;
         lastWindowProbeMs = 0;
+        lastAckProgressMs = 0;
         serverReport = null;
         statFirstSends.set(0);
         statRetransmits.set(0);
@@ -388,8 +403,9 @@ public class Client {
         NetworkSimulator.configure(s.lossPercent / 100.0, s.corruptPercent / 100.0, minDelay, maxDelay);
 
         byte[] fullData = loadData(s);
-        segmentSize = s.dataSource.equals(SessionSettings.SAMPLE) ? SAMPLE_SEGMENT_SIZE
+        requestedSegmentSize = s.dataSource.equals(SessionSettings.SAMPLE) ? SAMPLE_SEGMENT_SIZE
                 : Math.max(8, Math.min(MAX_PAYLOAD_SIZE, s.segmentSize));
+        segmentSize = requestedSegmentSize;
         log("Cua so toi da (window_size) = " + windowSize + " segment | dieu khien tac nghen: "
                 + (s.congestionControl ? "BAT (ssthresh ban dau=" + s.ssthresh + ")" : "TAT")
                 + " | du lieu = " + fullData.length + " byte");
@@ -433,6 +449,7 @@ public class Client {
                         && Packet.hasFlag(response.flags, Packet.FLAG_ACK)
                         && response.ackNum == clientIsn + 1) {
                     synAckReceived = response;
+                    publishTransferEstimateWarning(fullData.length, response.payload);
                     log("Nhan duoc SYN-ACK hop le: " + response);
                     EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Server -> Client",
                             response.flagsToString(), response.seqNum, response.ackNum, "Phan hoi bat tay"));
@@ -448,6 +465,7 @@ public class Client {
         }
 
         int serverIsn = synAckReceived.seqNum;
+        adjustSegmentSizeToRemoteWindow();
         int currentSeq = clientIsn + 1;
         Packet finalAck = new Packet(currentSeq, serverIsn + 1, Packet.FLAG_ACK, new byte[0]);
         sendRaw(finalAck);
@@ -459,6 +477,7 @@ public class Client {
         // Tu day, KHONG dung socket timeout nua - ReceiverThread se tu chan cho goi tin den.
         clientSocket.setSoTimeout(0);
         lastAckNum = currentSeq; // ACK dau tien cua du lieu se > gia tri nay
+        lastAckProgressMs = System.currentTimeMillis();
         dupAckCount = 0;
 
         // ================= KHOI DONG 2 THREAD NEN =================
@@ -542,8 +561,15 @@ public class Client {
         if (got == null) {
             report.dataCheck = "KHONG_XAC_MINH";
             log("Kiem tra du lieu: Server khong gui bao cao (dang dung Server.java ban cu?).");
-        } else if (got.equals(expected)) {
+        } else if (got.equals(expected) || got.startsWith(expected + ";file=")) {
             report.dataCheck = "DUNG";
+            int fileMarker = got.indexOf(";file=");
+            if (fileMarker >= 0) {
+                String fileName = got.substring(fileMarker + 6).trim();
+                if (!fileName.isEmpty() && !fileName.contains("/") && !fileName.contains("\\")) {
+                    report.receivedFilePath = "received/" + fileName;
+                }
+            }
             log("Kiem tra du lieu: DUNG - Server rap duoc " + got + " (khop voi du lieu da gui).");
         } else {
             report.dataCheck = "SAI";
@@ -569,6 +595,32 @@ public class Client {
             return Files.readAllBytes(path);
         }
         return BASE_MESSAGE.repeat(Math.max(1, s.messageRepeat)).getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static void publishTransferEstimateWarning(int dataBytes, byte[] metadata) {
+        String info = new String(metadata == null ? new byte[0] : metadata, StandardCharsets.US_ASCII);
+        int appReadBytes = parseMetadataInt(info, "app_read_bytes");
+        int appReadIntervalMs = parseMetadataInt(info, "app_read_interval_ms");
+        if (appReadBytes <= 0 || appReadIntervalMs <= 0) return;
+        long estimatedMs = (long) Math.ceil(dataBytes * (double) appReadIntervalMs / appReadBytes);
+        if (estimatedMs > 5 * 60 * 1000L) {
+            String warning = "CANH BAO: toc do doc Server uoc tinh se mat hon 5 phut (khoang "
+                    + Math.max(1, estimatedMs / 1000L) + " s)";
+            log(warning);
+            EventBus.publish(new PacketEvent(PacketEvent.Status.ACKED, "Client", "WARNING",
+                    0, 0, warning));
+        }
+    }
+
+    private static int parseMetadataInt(String metadata, String key) {
+        String prefix = key + "=";
+        for (String part : metadata.split(";")) {
+            if (part.startsWith(prefix)) {
+                try { return Integer.parseInt(part.substring(prefix.length())); }
+                catch (NumberFormatException ignored) { return -1; }
+            }
+        }
+        return -1;
     }
 
     /**
@@ -657,8 +709,10 @@ public class Client {
             }
             if (inflight < flowControlledWindow()
                     && inflightBytes + nextPayloadBytes <= remoteWindow) {
+                lastAckProgressMs = System.currentTimeMillis();
                 return;
             }
+            checkNoProgressTimeout(nextPayloadBytes);
             if (remoteWindow < Math.min(segmentSize, nextPayloadBytes)) {
                 long now = System.currentTimeMillis();
                 if (now - lastWindowProbeMs >= ZERO_WINDOW_PROBE_INTERVAL_MS) {
@@ -667,6 +721,29 @@ public class Client {
                 }
             }
             Thread.sleep(5);
+        }
+    }
+
+    private static void checkNoProgressTimeout(int nextPayloadBytes) {
+        if (remoteWindow >= nextPayloadBytes || NO_PROGRESS_TIMEOUT_MS <= 0) return;
+        long elapsed = System.currentTimeMillis() - lastAckProgressMs;
+        if (elapsed >= NO_PROGRESS_TIMEOUT_MS) {
+            long seconds = Math.max(1, NO_PROGRESS_TIMEOUT_MS / 1000L);
+            resetReason = "Server khong mo cua so nhan (rwnd=" + remoteWindow + ") sau "
+                    + seconds + " s";
+            transferFailed = true;
+            try {
+                if (clientSocket != null) clientSocket.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private static void adjustSegmentSizeToRemoteWindow() {
+        if (remoteWindow < requestedSegmentSize) {
+            segmentSize = Math.max(1, Math.min(requestedSegmentSize, remoteWindow));
+            log("Bo dem Server " + remoteWindow + " byte nho hon segment " + requestedSegmentSize
+                    + " byte -> ha segment xuong " + segmentSize);
         }
     }
 
@@ -732,7 +809,9 @@ public class Client {
                                 || connectionState == ConnectionState.FIN_WAIT_1
                                 || connectionState == ConnectionState.FIN_WAIT_2);
                     if (dataAck) {
+                        int previousWindow = remoteWindow;
                         remoteWindow = response.window;
+                        if (response.window > previousWindow) lastAckProgressMs = System.currentTimeMillis();
                         EventBus.publishRwnd(System.currentTimeMillis() - sessionStartMs, remoteWindow);
                     }
                     int ackNum = response.ackNum;
@@ -785,6 +864,7 @@ public class Client {
                     if (!Packet.hasFlag(response.flags, Packet.FLAG_SYN)) {
                         if (ackNum > lastAckNum) {
                             lastAckNum = ackNum; // ACK moi, tien len -> het chuoi trung lap
+                            lastAckProgressMs = System.currentTimeMillis();
                             dupAckCount = 0;
                         } else if (ackNum == lastAckNum) {
                             dupAckCount++;

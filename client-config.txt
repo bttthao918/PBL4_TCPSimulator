@@ -1,6 +1,6 @@
 # File cau hinh Client
 # "auto" tu tim Server trong cung LAN; hoac dien IPv4 cua may Server neu can.
-server_ip=10.10.49.227
+server_ip=172.31.98.202
 
 # Mo phong mang (tuy chon) - de 0 neu muon demo qua mang LAN that,
 # khong can gia lap gi them vi mang that da co do tre/rui ro tu nhien.

@@ -14,7 +14,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
@@ -286,7 +285,6 @@ public class Server {
             byte[] assembled = session.receivedData.toByteArray();
             CRC32 crc = new CRC32();
             crc.update(assembled);
-            String report = "len=" + assembled.length + ";crc=" + Long.toHexString(crc.getValue());
             Path receivedFile = Paths.get("received", "unknown.bin");
             try {
                 Path receivedDir = Paths.get("received");
@@ -298,6 +296,8 @@ public class Server {
             } catch (IOException e) {
                 session.log("CANH BAO: khong luu duoc file received: " + e.getMessage());
             }
+            String report = "len=" + assembled.length + ";crc=" + Long.toHexString(crc.getValue())
+                    + ";file=" + receivedFile.getFileName();
             session.lastFinAckPayload = report.getBytes(StandardCharsets.UTF_8);
             session.lastFinSeq = packet.seqNum;
             session.log("=== DU LIEU DA RAP DUOC (" + assembled.length + " byte), da luu: "
@@ -372,7 +372,9 @@ public class Server {
 
     private static void sendSynAck(DatagramSocket socket, ClientSession session, PacketEvent.Status status) {
         send(socket, session, new Packet(session.serverIsn, session.clientIsn + 1,
-                (byte) (Packet.FLAG_SYN | Packet.FLAG_ACK), availableReceiveWindow(session), new byte[0]), status);
+                (byte) (Packet.FLAG_SYN | Packet.FLAG_ACK), availableReceiveWindow(session),
+                ("app_read_bytes=" + APP_READ_BYTES + ";app_read_interval_ms=" + APP_READ_INTERVAL_MS)
+                        .getBytes(StandardCharsets.US_ASCII)), status);
         session.log("Da gui SYN-ACK (seq=" + session.serverIsn + ", ack=" + (session.clientIsn + 1) + ").");
     }
 

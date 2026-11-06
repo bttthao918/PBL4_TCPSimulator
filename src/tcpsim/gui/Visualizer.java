@@ -6,9 +6,14 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.awt.geom.Path2D;
 import java.io.File;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import tcpsim.Client;
 
 /**
  * Visualizer.java (giao dien ban 6 - gon gang hon)
@@ -62,11 +67,13 @@ public class Visualizer {
     private final JTextField fileField;
     private final JCheckBox ccCheck;
     private final JButton runButton;
+    private final JButton stopButton;
     private final JButton openReceivedButton;
 
     // ---- Cot ket qua ----
     private final JLabel resultBadge;
     private final JLabel reasonLabel;
+    private final JLabel receivedFileLabel;
     private final JLabel valData, valTime, valPhases, valSpeed, valSegments, valSends, valRetrans, valFast,
             valLost, valCorrupt, valCwndDrops, valCwndMax, valRto;
 
@@ -122,6 +129,9 @@ public class Visualizer {
         runButton = new AccentButton("Chay lai");
         runButton.setName("runButton");
         runButton.addActionListener(e -> startSession());
+        stopButton = new JButton("Dung");
+        stopButton.setEnabled(false);
+        stopButton.addActionListener(e -> stopSession());
 
         sizeSpinner.setToolTipText("Moi don vi = 47 byte (1 cau mau). Vi du 8 -> 376 byte -> 47 segment.");
         delayMaxSpinner.setToolTipText("Neu nho hon tre min thi se duoc nang len bang tre min.");
@@ -163,12 +173,15 @@ public class Visualizer {
         left(runButton);
         runButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
         side.add(runButton);
+        stopButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+        side.add(stopButton);
         openReceivedButton = new JButton("Mo thu muc received");
         openReceivedButton.setEnabled(false);
         openReceivedButton.addActionListener(e -> openReceivedFolder());
         left(openReceivedButton);
         side.add(Box.createVerticalStrut(5));
         side.add(openReceivedButton);
+        updateReceivedButtonAvailability(initial.serverIp);
         updateSourceFields();
 
         side.add(Box.createVerticalStrut(20));
@@ -199,6 +212,7 @@ public class Visualizer {
         metrics.setOpaque(false);
         int m = 0;
         valData = metricRow(metrics, m++, "Du lieu", "valData");
+        receivedFileLabel = metricRow(metrics, m++, "File luu tren may Server", "receivedFileLabel");
         valTime = metricRow(metrics, m++, "Tong thoi gian", "valTime");
         valPhases = metricRow(metrics, m++, "Bat tay + truyen", "valPhases");
         valSpeed = metricRow(metrics, m++, "Toc do", "valSpeed");
@@ -438,6 +452,7 @@ public class Visualizer {
         s.segmentSize = intValue(segmentSpinner);
         s.timeWaitMs = intValue(timeWaitSpinner);
         s.congestionControl = ccCheck.isSelected();
+        updateReceivedButtonAvailability(s.serverIp);
         return s;
     }
 
@@ -457,8 +472,35 @@ public class Visualizer {
     }
 
     private void openReceivedFolder() {
-        try { Desktop.getDesktop().open(new File("received")); }
-        catch (Exception e) { reasonLabel.setText("Khong mo duoc thu muc received: " + e.getMessage()); }
+        try {
+            Files.createDirectories(Paths.get("received"));
+            Desktop.getDesktop().open(new File("received"));
+        } catch (Exception e) {
+            JOptionPane.showMessageDialog(frame,
+                    "Khong mo duoc thu muc received tren may Client. " + e.getMessage(),
+                    "Khong mo duoc thu muc", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void updateReceivedButtonAvailability(String serverIp) {
+        boolean local = isLocalServerAddress(serverIp);
+        openReceivedButton.setEnabled(local);
+        openReceivedButton.setToolTipText(local ? "Mo received tren may nay"
+                : "Server chay tren may khac: mo thu muc received tren may Server");
+    }
+
+    private boolean isLocalServerAddress(String configured) {
+        if (configured == null || configured.trim().isEmpty() || "auto".equalsIgnoreCase(configured.trim())) return false;
+        try {
+            for (InetAddress address : InetAddress.getAllByName(configured.trim())) {
+                if (address.isLoopbackAddress() || address.isAnyLocalAddress()) return true;
+                NetworkInterface network = NetworkInterface.getByInetAddress(address);
+                if (network != null) return true;
+            }
+        } catch (Exception ignored) {
+            // Khong xac dinh duoc -> coi la server may khac de tranh mo nham thu muc.
+        }
+        return false;
     }
 
     private void startSession() {
@@ -466,6 +508,7 @@ public class Visualizer {
         chartPanel.setWindowLimit(settings.windowSize);
         reset();
         runButton.setEnabled(false);
+        stopButton.setEnabled(true);
         resultBadge.setText("DANG CHAY...");
         resultBadge.setBackground(ORANGE);
         reasonLabel.setText(" ");
@@ -484,6 +527,13 @@ public class Visualizer {
         }, "MainThread");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    private void stopSession() {
+        Client.cancelSession();
+        stopButton.setEnabled(false);
+        reasonLabel.setText("Nguoi dung huy phien");
+        reasonLabel.setVisible(true);
     }
 
     /** Xoa sach man hinh cua phien truoc (chay tren EDT, ngay khi bam nut). */
@@ -529,6 +579,10 @@ public class Visualizer {
                 int arrow = event.note.lastIndexOf(" -> ");
                 connectionState = arrow >= 0 ? event.note.substring(arrow + 4) : event.note;
             }
+            if ("WARNING".equals(event.packetType)) {
+                reasonLabel.setText("<html><div style='width:230px'>" + event.note + "</div></html>");
+                reasonLabel.setVisible(true);
+            }
             if (!"STATE".equals(event.packetType)) {
                 diagramPanel.addEvent(event);
             }
@@ -572,7 +626,8 @@ public class Visualizer {
         if (report != null) {
             showReport(report);
             runButton.setEnabled(true);
-            openReceivedButton.setEnabled(true);
+            stopButton.setEnabled(false);
+        updateReceivedButtonAvailability(ipField.getText().trim());
         }
     }
 
@@ -632,7 +687,7 @@ public class Visualizer {
     // CAT KET QUA (BUOC 4)
     // =====================================================================
     private void clearMetrics() {
-        for (JLabel v : new JLabel[]{valData, valTime, valPhases, valSpeed, valSegments, valSends,
+        for (JLabel v : new JLabel[]{valData, receivedFileLabel, valTime, valPhases, valSpeed, valSegments, valSends,
                 valRetrans, valFast, valLost, valCorrupt, valCwndDrops, valCwndMax, valRto}) {
             v.setText("-");
             v.setForeground(Color.BLACK);
@@ -662,6 +717,9 @@ public class Visualizer {
                 valData.setForeground(TEXT_MUTED);
                 break;
         }
+        receivedFileLabel.setText(r.receivedFilePath.isEmpty() ? "khong ro" : r.receivedFilePath);
+        receivedFileLabel.setToolTipText(r.receivedFilePath.isEmpty()
+                ? "Server cu co the khong gui ten file" : r.receivedFilePath);
 
         if (r.transferMs > 0) {
             double hs = r.handshakeMs / 1000.0;
